@@ -1,0 +1,15 @@
+{
+  "originHash" : "0fbe9873866bc9d9c96b5a74f3467049a67bceb02a8823a54a343cdf3a9f3851",
+  "pins" : [
+    {
+      "identity" : "workspacekit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/ajmcclary/WorkspaceKit.git",
+      "state" : {
+        "revision" : "d557ffe53ce47d461be3a745956774df21dbe9c3",
+        "version" : "0.1.0-beta.9"
+      }
+    }
+  ],
+  "version" : 3
+}
