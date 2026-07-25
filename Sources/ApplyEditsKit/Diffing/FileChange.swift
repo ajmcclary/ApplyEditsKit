@@ -1,6 +1,10 @@
 import Foundation
 
-public struct FileChange: Identifiable, Equatable, Codable {
+/// `Sendable` because every stored property is a value type (`UUID`,
+/// `String`, `Int`, `DiffChunk`). The conformance is additive and is what
+/// lets the `dummy` static constant below be a concurrency-safe global
+/// under the Swift 6 language mode.
+public struct FileChange: Identifiable, Equatable, Codable, Sendable {
 	public let id: UUID
 	public let description: String
 	public var startLine: Int

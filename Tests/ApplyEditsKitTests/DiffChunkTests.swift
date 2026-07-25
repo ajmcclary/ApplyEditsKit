@@ -214,7 +214,11 @@ class UnifiedDiffPerformanceTests: XCTestCase {
         measure {
             let expectation = self.expectation(description: "Diff generation")
             
-            Task {
+            // `[newLines]` captures the array by value. Region isolation
+            // rejects capturing the mutable `var` itself; `newLines` is not
+            // mutated after the loop above, so the copy holds the same value
+            // the closure read before.
+            Task { [newLines] in
                 _ = try? await UnifiedDiffGenerator.build(
                     oldLines: oldLines,
                     newLines: newLines,
@@ -241,7 +245,8 @@ class UnifiedDiffPerformanceTests: XCTestCase {
         measure {
             let expectation = self.expectation(description: "Diff generation")
             
-            Task {
+            // By-value capture, same reasoning as above.
+            Task { [newLines] in
                 _ = try? await UnifiedDiffGenerator.build(
                     oldLines: oldLines,
                     newLines: newLines,

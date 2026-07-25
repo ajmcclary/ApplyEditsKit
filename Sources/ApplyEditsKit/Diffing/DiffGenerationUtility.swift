@@ -1542,9 +1542,15 @@ public class DiffGenerationUtility {
 		return nil
 	}
 
-	private static func withTimeout<T>(
+	/// `T: Sendable` and `@Sendable` on `operation` are what
+	/// `withThrowingTaskGroup` requires: the child result crosses back out of
+	/// the group, and `operation` is captured by a child task's closure.
+	/// This helper is `private` and its only call site is inside the
+	/// commented-out selector branch above, so tightening the constraint
+	/// changes no live behavior.
+	private static func withTimeout<T: Sendable>(
 		seconds: Double,
-		operation: @escaping () async throws -> T
+		operation: @escaping @Sendable () async throws -> T
 	) async throws -> T {
 		try await withThrowingTaskGroup(of: T.self) { group in
 			group.addTask {

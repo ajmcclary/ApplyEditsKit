@@ -35,22 +35,32 @@ import PackageDescription
 // (repo_similarity.c — WorkspaceKit adoption slice 4); the symbols link in
 // via the product dependency. Re-defining them here would create duplicate
 // link symbols for any consumer that links both packages, so the edge is
-// load-bearing, not incidental. Swift 5 language mode keeps the moved code
-// byte-behaviorally identical (AgentRuntimeKit / PromptAssemblyKit /
-// RepoPromptCore promoted-target precedent).
+// load-bearing, not incidental.
 //
-// Platform floor: macOS 14 ONLY — a deliberate divergence from the
-// AgentRuntimeKit / PromptAssemblyKit macOS 14 + iOS 17 precedent. Those
-// kits are dependency-free; this one links WorkspaceKit's umbrella
-// product, whose WorkspaceFileSystem target is FSEvents-backed and does
-// not compile for iOS (verified 2026-07-24: a generic/platform=iOS build
-// fails inside WorkspaceKit, not in this package). Claiming an iOS floor
-// here would be unprovable; RepoPromptCore, the only consumer, is
-// macOS-only anyway.
+// Language mode: Swift 6 (migrated 2026-07-25 from the Swift 5 mode the
+// promotion carried over). Every Swift target and the test target apply
+// the shared `swiftSettings` below; the ApplyEditsCSupport C target takes
+// no language mode (the setting is Swift-only).
+//
+// Platform floor: macOS 27 ONLY — macOS-only is a deliberate divergence
+// from the AgentRuntimeKit / PromptAssemblyKit macOS + iOS precedent.
+// Those kits are dependency-free; this one links WorkspaceKit's umbrella
+// product, whose FSEvents-backed filesystem target does not compile for
+// iOS (verified 2026-07-24: a generic/platform=iOS build fails inside
+// WorkspaceKit, not in this package; WorkspaceKit 0.1.0-beta.10 has since
+// dropped its iOS declaration outright). Claiming an iOS floor here would
+// be unprovable; RepoPromptCore, the only consumer, is macOS-only anyway.
+// The floor is spelled as a string because `.macOS(.v27)` requires
+// tools-version 6.4 and this manifest stays at 6.0.
+let swiftSettings: [SwiftSetting] = [
+    .swiftLanguageMode(.v6),
+    .enableExperimentalFeature("StrictConcurrency")
+]
+
 let package = Package(
     name: "ApplyEditsKit",
     platforms: [
-        .macOS(.v14)
+        .macOS("27.0")
     ],
     products: [
         // Bundles both targets: consumers import ApplyEditsKit for the
@@ -70,7 +80,7 @@ let package = Package(
         .target(
             name: "ApplyEditsKit",
             dependencies: ["ApplyEditsCSupport"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: swiftSettings
         ),
         // High-performance C string helpers (repo_* — indentation
         // encode/decode, escaping, line splitting, canonical keys,
@@ -85,7 +95,7 @@ let package = Package(
         .testTarget(
             name: "ApplyEditsKitTests",
             dependencies: ["ApplyEditsKit"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: swiftSettings
         )
     ]
 )

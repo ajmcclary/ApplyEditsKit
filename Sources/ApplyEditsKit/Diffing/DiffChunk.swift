@@ -1,6 +1,11 @@
 import Foundation
 
-public struct DiffChunk: Equatable {
+/// `Sendable` because both stored properties are value types with value
+/// semantics (`[DiffLine]`, `Int`) — they are declared `var`, but a copy is
+/// never shared. The conformance is additive and is what lets the
+/// `FileChange.dummy` static constant be a concurrency-safe global under the
+/// Swift 6 language mode.
+public struct DiffChunk: Equatable, Sendable {
 	public var lines: [DiffLine]
 	public var startLine: Int
 	
@@ -70,8 +75,12 @@ public struct DiffChunk: Equatable {
 
 import Foundation
 
-public struct DiffLine: Equatable {
-	public enum LineType: Equatable {
+/// `Sendable` because all three stored properties are value types
+/// (`LineType`, `String`, `String`). Public types get no implicit
+/// `Sendable` inference, so the conformance is spelled out here and on
+/// the nested `LineType`.
+public struct DiffLine: Equatable, Sendable {
+	public enum LineType: Equatable, Sendable {
 		case addition
 		case removal
 		case context

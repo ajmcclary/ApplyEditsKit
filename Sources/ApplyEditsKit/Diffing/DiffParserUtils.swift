@@ -1,7 +1,13 @@
 import Foundation
+import Synchronization
 
 /// Central on/off switch for every debug print in the diff-parser stack.
-public enum DebugFlags { static var parser = false }
+///
+/// `let`, not `var`: `parser` is internal to this module and no code in it
+/// ever assigned the property, so a compile-time constant `false` is the
+/// same value every existing read already saw. Nothing outside the module
+/// could ever set it either — the enum is `public` but the property is not.
+public enum DebugFlags { static let parser = false }
 
 /// Convenience wrapper so we can write `dprint("…")` instead of
 /// `if DebugFlags.parser { print("…") }`.
@@ -19,7 +25,26 @@ public struct DiffParserUtils {
 	// MARK: - Regex cache & helpers (perf)
 	
 	/// Small thread-safe cache for compiled regexes keyed by their pattern string.
-	private static let _regexCache = NSCache<NSString, NSRegularExpression>()
+	///
+	/// `nonisolated(unsafe)` invariant: `NSCache` performs its own internal
+	/// locking — Apple documents that you may "add, remove, and query items
+	/// in the cache from different threads without having to lock the cache
+	/// yourself" — so the two accesses below (`object(forKey:)` and
+	/// `setObject(_:forKey:)`) are already safe from any thread. The stored
+	/// values are `NSRegularExpression`, which IS `Sendable` in this SDK, and
+	/// the keys are `NSString` bridged from immutable Swift `String`s, so
+	/// nothing non-`Sendable` crosses the boundary. Only the `NSCache` class
+	/// itself is marked `@_nonSendable(_assumed)` in the SDK, which is why the
+	/// annotation is required at all.
+	///
+	/// Deliberately NOT replaced by a `Mutex<[String: NSRegularExpression]>`:
+	/// `extractContent(from:tag:)` is public and interpolates its caller-
+	/// supplied `tag` into the cached pattern, so the key space is unbounded
+	/// in principle. `NSCache`'s eviction under memory pressure is a real
+	/// property of this cache; a plain dictionary would grow without bound.
+	/// The concurrent path is exercised by
+	/// `DiffParserUtilsConcurrencyTests.testConcurrentRegexCacheAccessIsConsistent`.
+	nonisolated(unsafe) private static let _regexCache = NSCache<NSString, NSRegularExpression>()
 	
 	/// Returns a cached compiled regex for `pattern` or compiles & caches it.
 	/// Default options match the heavy extractors' needs.
@@ -227,7 +252,28 @@ public struct DiffParserUtils {
 		return escapeString(input)
 	}
 	
-	public static var isDebugEnabled: Bool = false
+	/// Backing storage for the public `isDebugEnabled` switch.
+	///
+	/// The property is public and settable, so a consumer may flip it from a
+	/// different concurrency domain while a parse is running; a plain
+	/// `static var` is a data race under the Swift 6 language mode. `Atomic`
+	/// is real synchronization rather than an escape hatch, and it keeps the
+	/// public `var` get/set shape unchanged.
+	private static let _isDebugEnabled = Atomic<Bool>(false)
+
+	/// Gates the two `print` diagnostics in `extractWithPattern`.
+	///
+	/// Behavior note: this used to be a stored `static var`, so reads and
+	/// writes were plain memory accesses; they are now atomic. A
+	/// set-then-parse caller on one thread observes exactly what it did
+	/// before. `.relaxed` ordering is sufficient because the flag is
+	/// independent state that only gates `print` — it orders nothing else —
+	/// and, exactly as before, a flip concurrent with a parse in flight is
+	/// not ordered against that parse, so the parse may observe either value.
+	public static var isDebugEnabled: Bool {
+		get { _isDebugEnabled.load(ordering: .relaxed) }
+		set { _isDebugEnabled.store(newValue, ordering: .relaxed) }
+	}
 	private static let backtickTags: Set<String> = ["start_selector", "end_selector", "content", "search"]
 	
 	// MARK: - Fence Seam and Sibling Boundary Cleanup
