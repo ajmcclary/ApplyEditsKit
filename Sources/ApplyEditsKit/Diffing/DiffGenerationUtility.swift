@@ -49,7 +49,8 @@ extension DiffGenerationError: CustomNSError {
     }
 }
 
-public enum DiffPrecision: String, CaseIterable {
+// Checked `Sendable` — payload-free String-raw-value enum. See FileAction.
+public enum DiffPrecision: String, CaseIterable, Sendable {
 	case normal = "Normal"
 	case high = "High"
 }
