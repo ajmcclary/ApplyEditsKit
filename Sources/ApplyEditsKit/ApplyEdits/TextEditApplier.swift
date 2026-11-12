@@ -360,7 +360,10 @@ struct TextEditApplier {
 				let high = sortedWidths.last!
 				let fileLow = Double(indentationWidth(anchors[low]!))
 				let fileHigh = Double(indentationWidth(anchors[high]!))
-				let scale = (fileHigh - fileLow) / Double(high - low)
+				// Indent units differ by small factors (2 vs 4 spaces); the
+				// clamp keeps a pathological pair of anchors from turning a
+				// model-supplied width into an unbounded allocation.
+				let scale = min(4, max(0, (fileHigh - fileLow) / Double(high - low)))
 				target = Int((fileLow + Double(width - low) * scale).rounded())
 			}
 			return indentation(ofWidth: max(0, target), style: fileIndentStyle()) + content
