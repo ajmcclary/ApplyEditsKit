@@ -32,20 +32,22 @@ public struct DiffApplicator {
 				} else if currentLine < result.count {
 					result.insert(diffLine.content, at: currentLine)
 				} else {
-					return result
+					throw DiffApplicationError.outOfBounds(line: currentLine, contentSize: result.count)
 				}
 				currentLine += 1
 			case .removal:
+				// A chunk that runs past the end of the content does not fit it;
+				// applying the part that fits would rewrite the wrong lines.
 				if currentLine < result.count {
 					result.remove(at: currentLine)
 				} else {
-					return result
+					throw DiffApplicationError.outOfBounds(line: currentLine, contentSize: result.count)
 				}
 			case .context:
 				if currentLine < result.count {
 					currentLine += 1
 				} else {
-					return result
+					throw DiffApplicationError.outOfBounds(line: currentLine, contentSize: result.count)
 				}
 			}
 		}

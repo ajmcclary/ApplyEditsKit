@@ -57,8 +57,14 @@ public struct DiffBatchGenerator {
 			do {
 				let start = cursor.startLine(for: edit.search)
 				
-				// ✅ Sanitize replacement content (idempotent)
-				let sanitizedContent = String.promoteEscapedTabsInEncodedLines(edit.content, enabled: tabPromotionEnabled)
+				// ✅ Sanitize replacement content (idempotent) — only when the
+				// search itself used leading "\t" escapes as indentation;
+				// otherwise they are content (`\tau`, `\times`, `\temp`, …).
+				let searchUsesEscapedTabs = !String.findLinesWithLeadingEscapedTabs(edit.search).isEmpty
+				let sanitizedContent = String.promoteEscapedTabsInEncodedLines(
+					edit.content,
+					enabled: tabPromotionEnabled && searchUsesEscapedTabs
+				)
 				
 				let diff  = try await DiffGenerationUtility.generateDiff(
 					fileContent      : orig,

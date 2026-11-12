@@ -264,4 +264,101 @@ final class DiffGenerationUtilityTests: XCTestCase {
 		XCTAssertGreaterThan(adds, 0, "Rewrite should yield addition lines on empty original")
 	}
 
+	// MARK: - Non-matches are rejected; replace_all and promotion stay consistent
+
+	private var accountLines: [String] {
+		[
+			"<s0>import Foundation",
+			"<s0>",
+			"<s0>struct Account {",
+			"<s4>var balance: Int",
+			"<s4>var entries: [Int]",
+			"<s0>",
+			"<s4>func describe() -> String {",
+			"<s8>return \"Balance\"",
+			"<s4>}",
+			"<s0>",
+			"<s4>func total() -> Int {",
+			"<s8>return entries.reduce(0, +)",
+			"<s4>}",
+			"<s0>}",
+		]
+	}
+
+	func testSearchBlockThatIsNotInTheFileThrowsNoMatch() async {
+		for search in [
+			["<s0>this text does not exist anywhere in the file"],
+			["<s4>}", "<s4>func doesNotExistAnywhere() {"],
+		] {
+			do {
+				let chunks = try await DiffGenerationUtility.generateDiffWithSearchBlock(
+					fileContent: accountLines,
+					searchBlock: search,
+					newContent: ["<s0>// GONE"],
+					diffPrecision: .high,
+					mcpAmbiguityCheck: true
+				)
+				XCTFail("Expected noMatchFound for \(search), got \(chunks)")
+			} catch DiffGenerationError.noMatchFound {
+			} catch {
+				XCTFail("Expected noMatchFound for \(search), got \(error)")
+			}
+		}
+	}
+
+	func testTwoLineSelectorWhoseSecondLineIsMissingDoesNotFallBackToTheFirstLine() throws {
+		let file = ["struct Account {", "    }", "    func total() -> Int {", "    }"]
+		XCTAssertNil(try fastMatch(selector: ["    }", "    func doesNotExistAnywhere() {"], file: file))
+		let selData = ["    }", "    func doesNotExistAnywhere() {"].map { ld($0) }
+		let fileData = file.map { ld($0) }
+		XCTAssertNil(try DiffGenerationUtility.matchSelectorFastWithAmbiguityCheck(
+			selector: selData,
+			content: fileData,
+			lineIndex: DiffGenerationUtility.buildLineIndexMapHigh(content: fileData)
+		))
+	}
+
+	func testReplaceAllChunksUseOriginalLineNumbers() async throws {
+		let file = ["<s0>keep1", "<s0>A", "<s0>B", "<s0>keep2", "<s0>keep3", "<s0>A", "<s0>B", "<s0>keep4", "<s0>A", "<s0>B", "<s0>end"]
+		let (chunks, outcomes, _) = try await DiffBatchGenerator.generate(
+			originalLines: file,
+			edits: [Edit(search: ["<s0>A", "<s0>B"], content: ["<s0>AB"], replaceAll: true)],
+			precision: .high
+		)
+		XCTAssertEqual(outcomes.map(\.status), ["success"])
+
+		let changes = chunks.map { FileChange(startLine: $0.startLine, description: "", diffChunk: $0) }
+		let manager = ChangeManager(fileContent: file, changes: changes, lineEnding: "\n", fileAction: .modify)
+		for change in changes {
+			XCTAssertNil(manager.applyChange(change).error)
+		}
+		XCTAssertEqual(
+			manager.currentContentLines(),
+			["<s0>keep1", "<s0>AB", "<s0>keep2", "<s0>keep3", "<s0>AB", "<s0>keep4", "<s0>AB", "<s0>end"]
+		)
+	}
+
+	func testReplacementIsNotTabPromotedWhenTheSearchHadNoEscapedTabs() async throws {
+		let chunks = try await DiffGenerationUtility.generateDiffWithSearchBlock(
+			fileContent: ["<s0>Intro", "<s4>value", "<s0>Outro"],
+			searchBlock: ["<s4>value"],
+			newContent: ["<s4>\\theta = 1"],
+			diffPrecision: .high
+		)
+		let added = chunks.flatMap(\.lines).filter { $0.type == .addition }.map(\.content)
+		XCTAssertEqual(added, ["<s4>\\theta = 1"])
+
+		let (batchChunks, _, _) = try await DiffBatchGenerator.generate(
+			originalLines: ["<s0>Intro", "<s4>value", "<s0>Outro"],
+			edits: [Edit(search: ["<s4>value"], content: ["<s4>\\times 2"])],
+			precision: .high
+		)
+		let batchAdded = batchChunks.flatMap(\.lines).filter { $0.type == .addition }.map(\.content)
+		XCTAssertEqual(batchAdded, ["<s4>\\times 2"])
+	}
+
+	func testApplyingAChunkThatRunsPastTheEndThrows() {
+		let chunk = DiffChunk(lines: [DiffLine(content: " <s0>b"), DiffLine(content: "-<s0>c"), DiffLine(content: "+<s0>C")], startLine: 1)
+		XCTAssertThrowsError(try DiffApplicator.apply(chunk, to: ["<s0>a", "<s0>b"], startingAt: 1))
+	}
 }

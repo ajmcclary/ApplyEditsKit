@@ -307,6 +307,10 @@ public class DiffGenerationUtility {
 			searchBlock,
 			enabled: tabPromotionEnabled
 		)
+		// The replacement's leading "\t" escapes are read as indentation only
+		// when the search needed the same reading; otherwise they are content
+		// (`\tau`, `\times`, `\temp`, …) and must survive.
+		let replacementTabPromotion = tabPromotionEnabled && sanitizedSearch != searchBlock
 
 		// Precompute processed selector once (used in both single + replace_all paths)
 		let processedSearch = sanitizedSearch.map { processLine($0, precision: diffPrecision) }
@@ -317,12 +321,16 @@ public class DiffGenerationUtility {
 			allChunks.reserveCapacity(1)
 			var currentStartLine = searchStartLine
 			
-			while currentStartLine < fileContent.count {
+			// Stop once the rest of the file is shorter than the search block.
+			while currentStartLine + sanitizedSearch.count <= fileContent.count {
 				// ➊ Search only after `currentStartLine`
 				let fileSlice = fileContent[currentStartLine...]
 				let processedFileSlice = fileSlice.map { processLine($0, precision: diffPrecision) }
 				
-				let sliceIndexMap      = lineIndexMap ?? buildLineIndexMapHigh(content: processedFileSlice)
+				// A caller-supplied map indexes the whole file; it is only valid
+				// while the slice still starts at line 0.
+				let sliceIndexMap      = (currentStartLine == 0 ? lineIndexMap : nil)
+					?? buildLineIndexMapHigh(content: processedFileSlice)
 
 				// ➋ Locate match *inside* the slice
 				let localMatch: Int
@@ -353,13 +361,13 @@ public class DiffGenerationUtility {
 									oldBlock    : oldBlock,
 									searchBlock : sanitizedSearch,
 									newSnippet  : newContent,
-									tabPromotionEnabled: tabPromotionEnabled
+									tabPromotionEnabled: replacementTabPromotion
 								)
 
 				// ✅ Final guard: avoid introducing broken indentation
 				let sanitizedNew = String.promoteEscapedTabsInEncodedLines(
 					correctedNew,
-					enabled: tabPromotionEnabled
+					enabled: replacementTabPromotion
 				)
 
 				#if DEBUG
@@ -373,11 +381,9 @@ public class DiffGenerationUtility {
 				let edits     = DiffEditCreator.myersDiff(oldLines: oldBlock, newLines: sanitizedNew)
 				let diffLines = convertDiffEditsToLines(edits)
 
-				// ➍ Create chunks with absolute positions, adjusting for accumulated changes
-				let positionOffset = allChunks.reduce(0) { acc, chunk in
-					acc + chunk.lineCountDifference()
-				}
-				let chunks = splitDiffLinesIntoChunks(diffLines: diffLines, startingAt: globalMatch + positionOffset)
+				// ➍ Create chunks in original-file coordinates, like every other
+				// path: appliers (ChangeManager) shift later chunks themselves.
+				let chunks = splitDiffLinesIntoChunks(diffLines: diffLines, startingAt: globalMatch)
 				allChunks.append(contentsOf: chunks)
 				
 				// Move cursor past the replaced section
@@ -396,7 +402,8 @@ public class DiffGenerationUtility {
 		let fileSlice = fileContent[searchStartLine...]
 		let processedFileSlice = fileSlice.map { processLine($0, precision: diffPrecision) }
 		
-		let sliceIndexMap      = lineIndexMap ?? buildLineIndexMapHigh(content: processedFileSlice)
+		let sliceIndexMap      = (searchStartLine == 0 ? lineIndexMap : nil)
+			?? buildLineIndexMapHigh(content: processedFileSlice)
 
 		// ➂ Locate match *inside* the slice
 		let localMatch = try await findBestMatchUsingNGrams(
@@ -420,13 +427,13 @@ public class DiffGenerationUtility {
 								oldBlock    : oldBlock,
 								searchBlock : sanitizedSearch,
 								newSnippet  : newContent,
-								tabPromotionEnabled: tabPromotionEnabled
+								tabPromotionEnabled: replacementTabPromotion
 							)
 
 		// ✅ Final guard: avoid introducing broken indentation
 		let sanitizedNew = String.promoteEscapedTabsInEncodedLines(
 			correctedNew,
-			enabled: tabPromotionEnabled
+			enabled: replacementTabPromotion
 		)
 
 		#if DEBUG
@@ -594,6 +601,17 @@ public class DiffGenerationUtility {
 		}
 		
 		bestMatch = refineMatch(selector: selector, in: content, around: bestMatch, windowSize: windowSize)
+		
+		// The best window is only a match if it clears the minimum score the
+		// refinement itself uses (an average line similarity of 0.5);
+		// otherwise "most similar" would mean "anything with a shared n-gram".
+		let matchUpper = bestMatch + selector.count
+		guard bestMatch >= 0, matchUpper <= content.count,
+			  calculateRefinedMatchScore(selector: selector, content: Array(content[bestMatch..<matchUpper]))
+				>= 0.5 * Double(selector.count)
+		else {
+			throw DiffGenerationError.noMatchFound
+		}
 		
 		return bestMatch
 	}
@@ -1383,11 +1401,13 @@ public class DiffGenerationUtility {
 		}
 		
 		// ── Fuzzy-probe fallback for 1–2-line selectors -------------------------
-		if selCount <= 2, !starts.isEmpty {
-			let fallbackIdx = starts.max { (fuzzyScoreMap[$0] ?? 0) < (fuzzyScoreMap[$1] ?? 0) }!
+		if selCount <= 2,
+		   let fallbackIdx = try tinySelectorFallback(
+			selector: selector, content: content, starts: starts,
+			threshold: fuzzyThresh, rejectTies: false
+		   ) {
 			if enableDetailedLogging {
-				let coeff = fuzzyScoreMap[fallbackIdx] ?? -1
-				print("🟡  Fuzzy-probe fallback accepted @\(fallbackIdx)  Dice=\(coeff)")
+				print("🟡  Fuzzy-probe fallback accepted @\(fallbackIdx)")
 			}
 			return fallbackIdx
 		}
@@ -1532,15 +1552,67 @@ public class DiffGenerationUtility {
 		}
 		
 		// ── Tiny-selector fuzzy-probe fallback (identical to base version) ----
-		if selCount <= 2, !starts.isEmpty {
-			let fallbackIdx = starts.max {
-				(fuzzyScoreMap[$0] ?? 0) < (fuzzyScoreMap[$1] ?? 0)
-			}!
+		if selCount <= 2,
+		   let fallbackIdx = try tinySelectorFallback(
+			selector: selector, content: content, starts: starts,
+			threshold: fuzzyThresh, rejectTies: true
+		   ) {
 			return fallbackIdx
 		}
 		
 		// Nothing matched
 		return nil
+	}
+
+	/// Fallback for 1–2 line selectors that no candidate passed strictly.
+	/// A candidate qualifies only if *every* selector line equals its file
+	/// line or reaches `threshold` Dice similarity (raised to the adaptive
+	/// threshold for that line's own length); the best total wins, ties
+	/// go to the lowest index (or throw when `rejectTies`). Candidates that
+	/// merely share the first line, or that came from no similarity check at
+	/// all, are never returned.
+	private static func tinySelectorFallback(
+		selector: [LineData],
+		content: [LineData],
+		starts: [Int],
+		threshold: Double,
+		rejectTies: Bool
+	) throws -> Int? {
+		var best: (index: Int, score: Double)?
+		var tiedIndices: [Int] = []
+		for start in Set(starts).sorted() where start >= 0 && start + selector.count <= content.count {
+			var total = 0.0
+			var qualifies = true
+			for offset in 0..<selector.count {
+				let wanted = selector[offset].removedTagsHigh
+				let actual = content[start + offset].removedTagsHigh
+				let score = wanted == actual ? 1.0 : wanted.diceCoefficient(against: actual)
+				// Each line must clear the bar for its own length: a short first
+				// line ("}") must not lower the bar for a long second line.
+				let lineThreshold = max(threshold, adaptiveDiceThreshold(forShortestLine: wanted.count))
+				if score < lineThreshold {
+					qualifies = false
+					break
+				}
+				total += score
+			}
+			guard qualifies else { continue }
+			if let current = best, total <= current.score {
+				if total == current.score { tiedIndices.append(start) }
+				continue
+			}
+			best = (start, total)
+			tiedIndices = [start]
+		}
+		if rejectTies, tiedIndices.count > 1 {
+			let lines = tiedIndices.map { String($0 + 1) }.joined(separator: ", ")
+			throw DiffGenerationError.ambiguousMatch(
+				"Search block matches multiple locations (lines \(lines)). " +
+				"Please make the block more specific or " +
+				"use the replace_all parameter to replace all occurrences."
+			)
+		}
+		return best?.index
 	}
 
 	/// `T: Sendable` and `@Sendable` on `operation` are what
