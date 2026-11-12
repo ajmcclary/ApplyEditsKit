@@ -230,6 +230,9 @@ public enum UnifiedDiffGenerator {
         }
         
         var hunks: [DiffChunk] = []
+        // Index of the last non-equal edit, so "are there changes ahead?"
+        // is O(1) per equal run instead of a scan of the remaining edits.
+        let lastChangeIndex = edits.lastIndex { $0.type != .equal } ?? -1
         
         var currentLines:   [DiffLine] = []
         var contextBuffer:  [DiffLine] = []
@@ -257,7 +260,7 @@ public enum UnifiedDiffGenerator {
                 
                 // If the unchanged run is now larger than context*2 …
                 if contextBuffer.count > context * gapToSplitMultiplier {
-                    let moreChangesAhead = edits[(idx+1)...].contains { $0.type != .equal }
+                    let moreChangesAhead = idx < lastChangeIndex
 
                     // Split only if we ALREADY recorded changes *and* there are more ahead.
                     if hunkHasChange(currentLines) && moreChangesAhead {
