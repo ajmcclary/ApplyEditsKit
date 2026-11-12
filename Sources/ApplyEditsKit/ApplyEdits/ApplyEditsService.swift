@@ -23,6 +23,18 @@ public struct ApplyEditsService {
 		let result = previewResult.result
 
 		if result.editsApplied > 0 {
+			// The edit was computed against `originalText`; if the file changed
+			// since (the user saved, another tool wrote), writing would silently
+			// discard that change. The port has no compare-and-swap, so this
+			// re-read narrows the window rather than closing it.
+			if previewResult.exists, let originalText = previewResult.originalText {
+				let currentText = try await host.readText(path: request.path)
+				guard currentText == originalText else {
+					throw ApplyEditsError.invalidParams(
+						"File '\(request.path)' changed while the edit was being prepared; nothing was written. Read the file again and retry."
+					)
+				}
+			}
 			try await EditFlowPerf.measure(
 				EditFlowPerf.Stage.ApplyEdits.hostWrite,
 				EditFlowPerf.Dimensions(fileBytes: result.updatedText.utf8.count, appliedCount: result.editsApplied)

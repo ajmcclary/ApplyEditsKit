@@ -433,3 +433,38 @@ extension ApplyEditsMatchingAndFidelityTests {
 		XCTAssertEqual(try applier.apply(chunks: [], to: original, fileAction: .modify), original)
 	}
 }
+
+// MARK: - Service
+
+extension ApplyEditsMatchingAndFidelityTests {
+	private actor ChangingHost: FileEditHost {
+		private var reads = 0
+		private(set) var writes: [String] = []
+		func fileExists(path: String) async -> Bool { true }
+		func readText(path: String) async throws -> String {
+			reads += 1
+			return reads == 1 ? "Hello\n" : "Hello\nuser edit\n"
+		}
+		func writeText(path: String, content: String, overwrite: Bool) async throws {
+			writes.append(content)
+		}
+	}
+
+	func testServiceDoesNotOverwriteAFileThatChangedAfterItWasRead() async throws {
+		let host = ChangingHost()
+		let service = ApplyEditsService(engine: .default, host: host)
+		let request = ApplyEditsRequest(
+			path: "file.swift",
+			mode: .single(search: "Hello", replace: "Hi", replaceAll: false),
+			verbose: false
+		)
+		await XCTAssertThrowsErrorAsync(try await service.run(request)) { error in
+			guard case ApplyEditsError.invalidParams(let message) = error else {
+				return XCTFail("Expected invalidParams, got \(error)")
+			}
+			XCTAssertTrue(message.contains("changed"), message)
+		}
+		let writes = await host.writes
+		XCTAssertTrue(writes.isEmpty)
+	}
+}
