@@ -1280,3 +1280,32 @@ final class StringExtensionsWrapperTests: XCTestCase {
         _ = veryLongEscape.unescaped()
     }
 }
+
+// MARK: - Line splitting and indentation detection
+
+extension StringExtensionsWrapperTests {
+	func testSplittingLinesDoesNotStopAtNUL() {
+		let (lines, ending) = String.splitContentPreservingLineEndings("a\r\nb\0c\r\nd")
+		XCTAssertEqual(lines, ["a", "b\0c", "d"])
+		XCTAssertEqual(ending, "\r\n")
+	}
+
+	func testSplittingLinesReportsMajorityEndingAndDropsTrailingEmptyLine() {
+		XCTAssertEqual(String.splitContentPreservingLineEndings("a\nb\r\nc\n").0, ["a", "b", "c"])
+		XCTAssertEqual(String.splitContentPreservingLineEndings("a\nb\r\nc\n").1, "\n")
+		XCTAssertEqual(String.splitContentPreservingLineEndings("a\r\nb\n").1, "\n")
+		XCTAssertEqual(String.splitContentPreservingLineEndings("a\rb\r").0, ["a", "b"])
+		XCTAssertEqual(String.splitContentPreservingLineEndings("a\rb\r").1, "\r")
+		XCTAssertEqual(String.splitContentPreservingLineEndings("a\n\n").0, ["a", ""])
+		XCTAssertEqual(String.splitContentPreservingLineEndings("").0, [])
+		XCTAssertEqual(String.splitContentPreservingLineEndings("").1, "\n")
+		XCTAssertEqual(String.splitContentPreservingLineEndings("é\u{301}\nz").0, ["é\u{301}", "z"])
+	}
+
+	func testOneTabIndentedLineDoesNotMakeASpaceIndentedFileTabIndented() {
+		let lines = ["root:", "  a:", "    b: 1", "\tlegacy: true", "  c: 2"]
+		XCTAssertEqual(String.detectIndentationTypeFromLines(lines).type, "s")
+		XCTAssertEqual(String.detectIndentationTypeFromLines(["\ta", "\tb", "  c"]).type, "t")
+		XCTAssertEqual(String.detectIndentationTypeFromLines(["\ta", "  c"]).type, "t")
+	}
+}

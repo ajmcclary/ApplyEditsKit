@@ -96,28 +96,60 @@ public extension String {
 		}
 	}
 	
+	/// Splits `content` into lines (without their endings) and reports the
+	/// most common line ending (ties go to the last ending seen; `"\n"` when
+	/// there is none). A trailing ending does not produce an empty last line.
+	///
+	/// Implemented in Swift over UTF-8 bytes rather than through the
+	/// NUL-terminated C helper, which stopped at the first `\0` and silently
+	/// dropped the rest of the content.
 	public static func splitContentPreservingLineEndings(_ content: String) -> ([String], String) {
-		return content.withCString { contentPtr in
-			guard let result = repo_split_content_preserving_endings(contentPtr) else {
-				return ([], "\n")
-			}
-			defer { repo_free_split_result(result) }
-			
-			// Convert C string array to Swift array
-			var lines: [String] = []
-			for i in 0..<result.pointee.line_count {
-				if let linePtr = result.pointee.lines.advanced(by: Int(i)).pointee {
-					lines.append(String(cString: linePtr))
+		let bytes = content.utf8
+		var lines: [String] = []
+		var unixCount = 0
+		var windowsCount = 0
+		var macCount = 0
+		var lastEnding = "\n"
+		var lineStart = bytes.startIndex
+		var index = bytes.startIndex
+		while index < bytes.endIndex {
+			let byte = bytes[index]
+			if byte == UInt8(ascii: "\r") || byte == UInt8(ascii: "\n") {
+				lines.append(String(decoding: bytes[lineStart..<index], as: UTF8.self))
+				let next = bytes.index(after: index)
+				if byte == UInt8(ascii: "\r"), next < bytes.endIndex, bytes[next] == UInt8(ascii: "\n") {
+					windowsCount += 1
+					lastEnding = "\r\n"
+					index = bytes.index(after: next)
+				} else if byte == UInt8(ascii: "\r") {
+					macCount += 1
+					lastEnding = "\r"
+					index = next
+				} else {
+					unixCount += 1
+					lastEnding = "\n"
+					index = next
 				}
+				lineStart = index
+			} else {
+				index = bytes.index(after: index)
 			}
-			
-			// Get detected ending
-			let detectedEnding = result.pointee.detected_ending != nil 
-				? String(cString: result.pointee.detected_ending) 
-				: "\n"
-			
-			return (lines, detectedEnding)
 		}
+		if lineStart < bytes.endIndex {
+			lines.append(String(decoding: bytes[lineStart..<bytes.endIndex], as: UTF8.self))
+		}
+
+		let ending: String
+		if windowsCount > unixCount && windowsCount > macCount {
+			ending = "\r\n"
+		} else if macCount > unixCount && macCount > windowsCount {
+			ending = "\r"
+		} else if unixCount > windowsCount && unixCount > macCount {
+			ending = "\n"
+		} else {
+			ending = lastEnding
+		}
+		return (lines, ending)
 	}
 	
 	public static func encodeIndentationAsTabs(_ line: String) -> String {
@@ -412,7 +444,9 @@ public extension String {
 			}
 		}
 		
-		if tabCount > 0 {
+		// Majority rule: one legacy tab-indented line must not turn a
+		// space-indented file into a "tab" file (ties keep the tab verdict).
+		if tabCount > 0 && tabCount >= spaceCount {
 			return ("t", 1)
 		} else if spaceCount > 0 {
 			// Find the most common space size
