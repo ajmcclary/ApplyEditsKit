@@ -113,11 +113,11 @@ public struct ApplyEditsEngine {
 			effectiveReplace = resolved.replace
 		}
 
-		let diffResult = try await EditFlowPerf.measure(
+		let generation = try await EditFlowPerf.measure(
 			EditFlowPerf.Stage.ApplyEdits.diffGeneration,
 			EditFlowPerf.Dimensions(fileBytes: originalText.utf8.count)
 		) {
-			try await diffEngine.makeDiffChunks(
+			try await diffEngine.makeEdit(
 				filePath: filePath,
 				originalText: originalText,
 				search: effectiveSearch,
@@ -126,17 +126,20 @@ public struct ApplyEditsEngine {
 				treatAsRewrite: treatAsRewrite
 			)
 		}
+		if let updatedText = generation.updatedText {
+			return (updatedText: updatedText, diffChunks: generation.chunks)
+		}
 		let updatedText = try EditFlowPerf.measure(
 			EditFlowPerf.Stage.ApplyEdits.patchApply,
-			EditFlowPerf.Dimensions(chunkCount: diffResult.chunks.count)
+			EditFlowPerf.Dimensions(chunkCount: generation.chunks.count)
 		) {
 			try patchApplier.apply(
-				chunks: diffResult.chunks,
+				chunks: generation.chunks,
 				to: originalText,
-				fileAction: diffResult.fileAction
+				fileAction: generation.fileAction
 			)
 		}
-		return (updatedText: updatedText, diffChunks: diffResult.chunks)
+		return (updatedText: updatedText, diffChunks: generation.chunks)
 	}
 
 	private func applyBatch(
@@ -164,7 +167,7 @@ public struct ApplyEditsEngine {
 			return literalResult
 		}
 
-		return try await applyBatchDiff(
+		return applyBatchSequentially(
 			edits: effectiveEdits,
 			originalText: originalText,
 			path: path,
@@ -173,56 +176,59 @@ public struct ApplyEditsEngine {
 		)
 	}
 
-	private func applyBatchDiff(
+	/// Applies the edits one after another, each to the result of the
+	/// previous ones (the semantics of `tryLiteralBatch`). An edit whose
+	/// search no longer matches — including text an earlier edit consumed —
+	/// fails on its own and the rest still apply. Repeated identical searches
+	/// take successive occurrences instead of failing as ambiguous.
+	private func applyBatchSequentially(
 		edits: [ApplyEditsOperation],
 		originalText: String,
 		path: String,
 		verbose: Bool,
 		options: ApplyEditsExecutionOptions
-	) async throws -> ApplyEditsResult {
-		let preparation = prepareOriginal(for: originalText)
-		let combinedSearch = edits.map { $0.search }.joined(separator: "\n")
-		let combinedReplace = edits.map { $0.replace }.joined(separator: "\n")
-		let tabPromotionEnabled = String.shouldPromoteLeadingEscapedTabs(
-			path: path,
-			searchRaw: combinedSearch.isEmpty ? nil : combinedSearch,
-			replaceRaw: combinedReplace.isEmpty ? nil : combinedReplace
-		)
-
-		let editModels: [Edit] = edits.compactMap { edit in
-			let searchLines = DiffEncodingUtils.encode(edit.search, usesSpaces: preparation.usesSpaces)
-			let contentLines = DiffEncodingUtils.encode(edit.replace, usesSpaces: preparation.usesSpaces)
-			let sanitizedSearch = String.promoteEscapedTabsInEncodedLines(searchLines, enabled: tabPromotionEnabled)
-			let sanitizedContent = String.promoteEscapedTabsInEncodedLines(contentLines, enabled: tabPromotionEnabled)
-			return Edit(search: sanitizedSearch, content: sanitizedContent, replaceAll: edit.replaceAll)
+	) -> ApplyEditsResult {
+		var searchCounts: [String: Int] = [:]
+		for edit in edits {
+			searchCounts[edit.search, default: 0] += 1
 		}
 
-		guard !editModels.isEmpty else {
-			throw ApplyEditsError.invalidParams("no valid {search,content} pairs supplied")
-		}
+		var text = originalText
+		var outcomes: [EditOutcome] = []
+		outcomes.reserveCapacity(edits.count)
+		var cursors: [String: Int] = [:]
+		var applied = 0
 
-		var searchBlockFrequency: [String: Int] = [:]
-		for edit in editModels {
-			let key = edit.search.joined(separator: "\n")
-			searchBlockFrequency[key, default: 0] += 1
-		}
-		let hasMultipleIdenticalBlocks = searchBlockFrequency.values.contains { $0 > 1 }
-		let shouldCheckAmbiguity = !hasMultipleIdenticalBlocks
-
-		let (chunks, outcomes, _) = try await EditFlowPerf.measure(
-			EditFlowPerf.Stage.ApplyEdits.diffGeneration,
-			EditFlowPerf.Dimensions(fileBytes: originalText.utf8.count, editCount: editModels.count)
+		EditFlowPerf.measure(
+			EditFlowPerf.Stage.ApplyEdits.patchApply,
+			EditFlowPerf.Dimensions(fileBytes: originalText.utf8.count, editCount: edits.count)
 		) {
-			try await DiffBatchGenerator.generate(
-				originalLines: preparation.encoded,
-				edits: editModels,
-				precision: .high,
-				mcpAmbiguityCheck: shouldCheckAmbiguity,
-				tabPromotionEnabled: tabPromotionEnabled
-			)
+			for (index, edit) in edits.enumerated() {
+				let takesNextOccurrence = !edit.replaceAll && (searchCounts[edit.search] ?? 0) > 1
+				do {
+					let outcome = try TextEditApplier.apply(
+						search: edit.search,
+						replace: edit.replace,
+						replaceAll: edit.replaceAll,
+						to: text,
+						path: path,
+						firstMatchAtOrAfter: takesNextOccurrence ? (cursors[edit.search] ?? 0) : nil
+					)
+					for (key, offset) in cursors {
+						cursors[key] = TextEditApplier.shift(offset, by: outcome.regions)
+					}
+					if takesNextOccurrence, let region = outcome.regions.first {
+						cursors[edit.search] = region.start + region.newLength
+					}
+					text = outcome.text
+					applied += 1
+					outcomes.append(EditOutcome(index: index, status: "success", error: nil))
+				} catch {
+					outcomes.append(EditOutcome(index: index, status: "failed", error: Self.message(for: error)))
+				}
+			}
 		}
 
-		let applied = outcomes.filter { $0.status == "success" }.count
 		if applied == 0 {
 			return ApplyEditsResult(
 				updatedText: originalText,
@@ -233,32 +239,26 @@ public struct ApplyEditsEngine {
 				note: nil,
 				fileCreated: false,
 				fileOverwritten: false,
-				editsRequested: editModels.count,
+				editsRequested: edits.count,
 				editsApplied: 0,
 				status: .failed,
 				outcomes: outcomes
 			)
 		}
 
-		let fileAction: FileAction = editModels.contains(where: { $0.search.isEmpty }) ? .rewrite : .modify
-		let updatedText = try EditFlowPerf.measure(
-			EditFlowPerf.Stage.ApplyEdits.patchApply,
-			EditFlowPerf.Dimensions(chunkCount: chunks.count)
+		let chunks = EditFlowPerf.measure(
+			EditFlowPerf.Stage.ApplyEdits.diffGeneration,
+			EditFlowPerf.Dimensions(fileBytes: originalText.utf8.count, editCount: edits.count)
 		) {
-			try patchApplier.apply(
-				chunks: chunks,
-				to: originalText,
-				fileAction: fileAction
-			)
+			ApplyEditsDisplayDiff.chunks(original: originalText, updated: text)
 		}
-
-		let status: ApplyEditsStatus = applied == editModels.count ? .success : .partial
+		let status: ApplyEditsStatus = applied == edits.count ? .success : .partial
 		return buildResult(
 			originalText: originalText,
-			updatedText: updatedText,
+			updatedText: text,
 			diffChunks: chunks,
 			note: nil,
-			editsRequested: editModels.count,
+			editsRequested: edits.count,
 			editsApplied: applied,
 			status: status,
 			outcomes: outcomes,
@@ -266,6 +266,15 @@ public struct ApplyEditsEngine {
 			verbose: verbose,
 			options: options
 		)
+	}
+
+	private static func message(for error: Error) -> String {
+		switch error {
+		case ApplyEditsError.invalidParams(let message), ApplyEditsError.internalError(let message):
+			return message
+		default:
+			return error.localizedDescription
+		}
 	}
 
 	private func tryLiteralBatch(
@@ -294,20 +303,11 @@ public struct ApplyEditsEngine {
 			}
 		}
 
-		let preparation = prepareOriginal(for: originalText)
-		let newLinesRaw = String.splitContentPreservingLineEndings(newText).0
-		let desiredIndentationType = preparation.usesSpaces ? "s" : "t"
-		let encodedNew = newLinesRaw.map {
-			String.encodeIndentationWithConversion($0, desiredIndentationType: desiredIndentationType)
-		}
 		let chunks = EditFlowPerf.measure(
 			EditFlowPerf.Stage.ApplyEdits.diffGeneration,
 			EditFlowPerf.Dimensions(fileBytes: originalText.utf8.count, editCount: edits.count)
 		) {
-			DiffGenerationUtility.generateRewriteDiff(
-				fileContent: preparation.encoded,
-				newContent: encodedNew
-			)
+			ApplyEditsDisplayDiff.chunks(original: originalText, updated: newText)
 		}
 
 		return buildResult(
@@ -424,18 +424,15 @@ public struct ApplyEditsEngine {
 			startLineBase: .oneBased
 		)
 	}
-
-	private func prepareOriginal(for originalText: String) -> (encoded: [String], usesSpaces: Bool) {
-		let (lines, _) = String.splitContentPreservingLineEndings(originalText)
-		let (indentType, _) = String.detectIndentationTypeFromLines(lines)
-		let encoded = lines.map {
-			String.encodeIndentationWithConversion($0, desiredIndentationType: indentType)
-		}
-		return (encoded, indentType == "s")
-	}
 }
 
+/// The engine's default edit generator. It computes the updated text with
+/// `TextEditApplier` (literal match, else a verified whitespace-lenient line
+/// match, else "not found"; `rewrite` takes the new text verbatim) and
+/// derives the chunks from that text for display.
 public struct DefaultDiffChunkGenerator: DiffChunkGenerator {
+	public init() {}
+
 	public func makeDiffChunks(
 		filePath: String,
 		originalText: String,
@@ -444,180 +441,102 @@ public struct DefaultDiffChunkGenerator: DiffChunkGenerator {
 		replaceAll: Bool,
 		treatAsRewrite: Bool
 	) async throws -> (chunks: [DiffChunk], fileAction: FileAction) {
-		let preparation = prepareOriginal(for: originalText)
-		let searchRaw = search ?? ""
-		return try await buildDiffChunks(
-			original: preparation.encoded,
+		let generation = try await makeEdit(
+			filePath: filePath,
 			originalText: originalText,
-			searchRaw: searchRaw,
-			replRaw: replace,
-			usesSpaces: preparation.usesSpaces,
+			search: search,
+			replace: replace,
 			replaceAll: replaceAll,
-			treatAsRewrite: treatAsRewrite,
-			filePath: filePath
+			treatAsRewrite: treatAsRewrite
 		)
+		return (generation.chunks, generation.fileAction)
 	}
 
-	private func prepareOriginal(for originalText: String) -> (encoded: [String], usesSpaces: Bool) {
-		let (lines, _) = String.splitContentPreservingLineEndings(originalText)
-		let (indentType, _) = String.detectIndentationTypeFromLines(lines)
-		let encoded = lines.map {
-			String.encodeIndentationWithConversion($0, desiredIndentationType: indentType)
-		}
-		return (encoded, indentType == "s")
-	}
-
-	private func buildDiffChunks(
-		original: [String],
+	public func makeEdit(
+		filePath: String,
 		originalText: String,
-		searchRaw: String,
-		replRaw: String,
-		usesSpaces: Bool,
+		search: String?,
+		replace: String,
 		replaceAll: Bool,
-		treatAsRewrite: Bool,
-		filePath: String
-	) async throws -> (chunks: [DiffChunk], fileAction: FileAction) {
-		if !treatAsRewrite, !searchRaw.isEmpty {
-			let literalMatches = originalText.ranges(of: searchRaw)
-			if !literalMatches.isEmpty {
-				var newText = originalText
-
-				if replaceAll {
-					newText = newText.replacingOccurrences(of: searchRaw, with: replRaw)
-				} else {
-					if literalMatches.count > 1 {
-						let lineList = literalMatches
-							.map { lineAndColumn(of: $0.lowerBound, in: originalText).0 }
-							.sorted()
-							.map(String.init)
-							.joined(separator: ", ")
-						throw ApplyEditsError.invalidParams(
-							"Search text matches multiple locations (lines \(lineList)). Please make the search more specific or use replace_all=true."
-						)
-					}
-					newText.replaceSubrange(literalMatches[0], with: replRaw)
-				}
-
-				let newLinesRaw = String.splitContentPreservingLineEndings(newText).0
-				let desiredIndentationType = usesSpaces ? "s" : "t"
-				let encodedNew = newLinesRaw.map {
-					String.encodeIndentationWithConversion($0, desiredIndentationType: desiredIndentationType)
-				}
-				let chunks = DiffGenerationUtility.generateRewriteDiff(fileContent: original, newContent: encodedNew)
-				return (chunks, .modify)
-			}
-
-			if replaceAll {
-				throw ApplyEditsError.invalidParams(
-					"search text not found in file (no literal matches for replace_all)"
-				)
-			}
-		}
-
-		let encodedSearch = DiffParserUtils.splitContentToLines(searchRaw, usesSpaces)
-		let encodedNew = DiffParserUtils.splitContentToLines(replRaw, usesSpaces)
-
-		let tabPromotionEnabled = String.shouldPromoteLeadingEscapedTabs(
-			path: filePath,
-			searchRaw: searchRaw,
-			replaceRaw: replRaw
-		)
-		let sanitizedSearch = String.promoteEscapedTabsInEncodedLines(encodedSearch, enabled: tabPromotionEnabled)
-		let sanitizedNew = String.promoteEscapedTabsInEncodedLines(encodedNew, enabled: tabPromotionEnabled)
-
-		let action: FileAction = (treatAsRewrite || sanitizedSearch.isEmpty) ? .rewrite : .modify
-
-		do {
-			let chunks = try await DiffGenerationUtility.generateDiff(
-				fileContent: original,
-				lineIndexMap: nil,
-				startSelector: nil,
-				endSelector: nil,
-				searchBlock: sanitizedSearch.isEmpty ? nil : sanitizedSearch,
-				newContent: sanitizedNew,
-				action: action,
-				diffPrecision: .high,
-				searchStartLine: 0,
-				mcpAmbiguityCheck: !replaceAll,
-				replaceAll: replaceAll,
-				tabPromotionEnabled: tabPromotionEnabled
-			)
-			return (chunks, action)
-		} catch let err as DiffGenerationError {
-			switch err {
-			case .noMatchFound:
-				let message = replaceAll
-					? "search block not found in file (no matches for replace_all)"
-					: "search block not found in file"
-				throw ApplyEditsError.invalidParams(message)
-			case .ambiguousMatch(let message):
-				let resolved = replaceAll
-					? "unexpected ambiguity error with replace_all=true: \(message)"
-					: message
-				throw ApplyEditsError.invalidParams(resolved)
-			default:
-				throw ApplyEditsError.internalError("diff generation failed: \(err.localizedDescription)")
-			}
-		} catch {
-			throw ApplyEditsError.internalError("diff generation failed: \(error.localizedDescription)")
-		}
-	}
-
-	private func lineAndColumn(of index: String.Index, in text: String) -> (Int, Int) {
-		let targetOffset = text.distance(from: text.startIndex, to: index)
-		let components = String.splitContentPreservingAllLineEndings(text)
-
-		var cumulative = 0
-		for (idx, pair) in components.enumerated() {
-			let partLen = pair.line.count + pair.ending.count
-			if targetOffset < cumulative + partLen {
-				let column = targetOffset - cumulative + 1
-				return (idx + 1, column)
-			}
-			cumulative += partLen
-		}
-		return (components.count, 1)
+		treatAsRewrite: Bool
+	) async throws -> DiffChunkGeneration {
+		let searchRaw = treatAsRewrite ? "" : (search ?? "")
+		let updatedText = try TextEditApplier.apply(
+			search: searchRaw,
+			replace: replace,
+			replaceAll: replaceAll,
+			to: originalText,
+			path: filePath
+		).text
+		let chunks = ApplyEditsDisplayDiff.chunks(original: originalText, updated: updatedText)
+		let action: FileAction = searchRaw.isEmpty ? .rewrite : .modify
+		return DiffChunkGeneration(chunks: chunks, fileAction: action, updatedText: updatedText)
 	}
 }
 
+/// Applies indentation-encoded chunks (start lines in original-file
+/// coordinates, as `DiffChunkGenerator`s produce them) to the original text.
+/// Untouched lines keep their own bytes and line endings; added lines take
+/// the file's dominant ending. Every context and removed line must match the
+/// file line it lands on (ignoring whitespace) and chunks must not overlap,
+/// otherwise the application fails instead of rewriting the wrong lines.
+/// No chunks means no change.
 public struct DefaultDiffChunkApplier: DiffChunkApplier {
+	public init() {}
+
 	public func apply(chunks: [DiffChunk], to originalText: String, fileAction: FileAction) throws -> String {
-		guard !chunks.isEmpty else {
-			throw ApplyEditsError.internalError("diff generation produced no changes.")
-		}
+		guard !chunks.isEmpty else { return originalText }
 
-		let decodedChunks = chunks.map { $0.getChunkWithDecodedIndentation() }
-		let (originalLines, lineEnding) = String.splitContentPreservingLineEndings(originalText)
-		let hadTrailingNewline = originalText.hasSuffix(lineEnding)
+		let lines = String.splitContentPreservingAllLineEndings(originalText)
+		let lineEnding = String.splitContentPreservingLineEndings(originalText).1
+		let decodedChunks = chunks
+			.map { $0.getChunkWithDecodedIndentation() }
+			.sorted { $0.startLine < $1.startLine }
 
-		var changes: [FileChange] = []
+		var output: [(line: String, ending: String)] = []
+		output.reserveCapacity(lines.count)
+		var cursor = 0
 		for chunk in decodedChunks {
-			changes.append(
-				FileChange(
-					id: UUID(),
-					startLine: chunk.startLine,
-					description: "Apply Edits",
-					diffChunk: chunk
+			guard chunk.startLine >= cursor, chunk.startLine <= lines.count else {
+				throw ApplyEditsError.internalError(
+					"diff application failed: a change at line \(chunk.startLine + 1) overlaps another change or lies outside the file"
 				)
-			)
-		}
-
-		let manager = ChangeManager(
-			fileContent: originalLines,
-			changes: changes,
-			lineEnding: lineEnding,
-			fileAction: fileAction,
-			hadTrailingNewline: hadTrailingNewline
-		)
-
-		for change in changes {
-			let result = manager.applyChange(change)
-			if let error = result.error {
-				throw ApplyEditsError.internalError("diff application failed: \(error)")
+			}
+			output.append(contentsOf: lines[cursor..<chunk.startLine])
+			cursor = chunk.startLine
+			for line in chunk.lines {
+				switch line.type {
+				case .context, .removal:
+					guard cursor < lines.count,
+						  TextEditApplier.lineMatchKey(lines[cursor].line) == TextEditApplier.lineMatchKey(line.content)
+					else {
+						throw ApplyEditsError.internalError(
+							"diff application failed: line \(cursor + 1) of the file does not match the change"
+						)
+					}
+					if line.type == .context {
+						output.append(lines[cursor])
+					}
+					cursor += 1
+				case .addition:
+					output.append((line.content, lineEnding))
+				}
 			}
 		}
+		output.append(contentsOf: lines[cursor...])
 
-		return manager.getUpdatedContent()
+		let hadFinalEnding = !(lines.last?.ending.isEmpty ?? true)
+		var result = ""
+		result.reserveCapacity(originalText.utf8.count)
+		for (index, entry) in output.enumerated() {
+			result += entry.line
+			if index < output.count - 1 {
+				result += entry.ending.isEmpty ? lineEnding : entry.ending
+			} else if hadFinalEnding {
+				result += entry.ending.isEmpty ? lineEnding : entry.ending
+			}
+		}
+		return result
 	}
 }
 
