@@ -190,9 +190,9 @@ final class ApplyEditsMatchingAndFidelityTests: XCTestCase {
 		)
 	}
 
-	func testBlockDifferingOnlyInTrailingAndInnerWhitespaceMatches() async throws {
+	func testBlockDifferingOnlyInTrailingWhitespaceMatches() async throws {
 		let result = try await single(
-			"    var balance:  Int   \n    var entries: [Int]",
+			"    var balance: Int   \n    var entries: [Int]\t",
 			"    var balance: Double\n    var entries: [Int]",
 			in: accountFile
 		)
@@ -200,6 +200,67 @@ final class ApplyEditsMatchingAndFidelityTests: XCTestCase {
 			result.updatedText,
 			accountFile.replacingOccurrences(of: "var balance: Int", with: "var balance: Double")
 		)
+	}
+
+	func testSearchWithCRLFMatchesLFFileAndKeepsFileEndings() async throws {
+		let result = try await single(
+			"  var balance: Int\r\n  var entries: [Int]",
+			"  var balance: Double\r\n  var entries: [Int]",
+			in: accountFile
+		)
+		XCTAssertEqual(
+			result.updatedText,
+			accountFile.replacingOccurrences(of: "var balance: Int", with: "var balance: Double")
+		)
+	}
+
+	// MARK: - Leniency never changes the file's structure
+
+	func testInnerWhitespaceIsNotLenient() async {
+		await assertNotFound("    var balance:  Int", in: accountFile)
+		await assertNotFound("\ts = \"a b\"", in: "s = \"a  b\"\n")
+		await assertNotFound("\tx = 'a b'", in: "x = 'a\u{00A0}b'\n")
+	}
+
+	func testSearchWhoseNestingContradictsTheFileFailsAsNotFound() async {
+		let python = "def f(x):\n    if x:\n        a()\n    b()\n"
+		let cases: [(file: String, search: String, path: String)] = [
+			(python, "if x:\na()", "m.py"),
+			(python, "if x:\na()\nb()", "m.py"),
+			("if x:\n    a()\nb()\n", "if x:\n    a()\n    b()", "m.py"),
+			("a:\n  b: 1\nc: 2\n", "a:\nb: 1", "c.yaml"),
+			("a:\n  b: 1\nc: 2\n", "a:\n  b: 1\n  c: 2", "c.yaml"),
+		]
+		for testCase in cases {
+			await XCTAssertThrowsErrorAsync(
+				try await self.single(testCase.search, "REPLACED", path: testCase.path, in: testCase.file)
+			) { error in
+				guard case ApplyEditsError.invalidParams(let message) = error else {
+					return XCTFail("Expected invalidParams for \(testCase.search), got \(error)")
+				}
+				XCTAssertTrue(message.contains("not found"), message)
+				XCTAssertTrue(message.contains("indentation"), message)
+			}
+		}
+	}
+
+	func testUniformlyShiftedPythonBlockIsReplacedAtTheFileIndentation() async throws {
+		let python = "def f(x):\n    if x:\n        a()\n    b()\n"
+		let result = try await single("if x:\n    a()", "if x:\n    c()\n    d()", path: "m.py", in: python)
+		XCTAssertEqual(result.updatedText, "def f(x):\n    if x:\n        c()\n        d()\n    b()\n")
+	}
+
+	func testReplacementDeeperOrShallowerThanTheSearchIsRebasedByTheSameShift() async throws {
+		let yaml = "root:\n  a:\n    b: 1\n  c: 2\n"
+		let result = try await single("a:\n  b: 1", "a:\n  b: 1\n  sub:\n    deep: true\nz: 0", path: "c.yaml", in: yaml)
+		XCTAssertEqual(result.updatedText, "root:\n  a:\n    b: 1\n    sub:\n      deep: true\n  z: 0\n  c: 2\n")
+	}
+
+	func testMatchIsChosenAmongCandidatesByIndentationStructure() async throws {
+		// The lines "if x:" / "a()" occur twice; only one has the search's nesting.
+		let python = "if x:\na()\nif x:\n    a()\n"
+		let result = try await single("  if x:\n      a()", "  if x:\n      b()", path: "m.py", in: python)
+		XCTAssertEqual(result.updatedText, "if x:\na()\nif x:\n    b()\n")
 	}
 
 	func testWhitespaceLenientResultIsDeterministic() async throws {

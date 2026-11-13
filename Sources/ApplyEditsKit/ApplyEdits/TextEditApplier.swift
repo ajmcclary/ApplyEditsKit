@@ -7,13 +7,16 @@ import Foundation
 /// Matching, in order:
 /// 1. **Literal.** The search text occurs verbatim. Exactly one occurrence is
 ///    required unless `replaceAll` is set (or a batch cursor picks one).
-/// 2. **Whitespace-lenient.** The search lines equal a run of whole file
-///    lines once leading/trailing whitespace is dropped and inner whitespace
-///    runs are collapsed. Case, punctuation and every non-whitespace
-///    character must agree on every line; the match must be unique unless
-///    `replaceAll` is set. A search whose lines start with escaped `\t`
-///    sequences is retried with those escapes read as indentation (not for
-///    TeX paths).
+/// 2. **Indentation-lenient.** The search lines equal a run of whole file
+///    lines once leading indentation and trailing spaces/tabs are dropped;
+///    everything in between, inner whitespace included, must agree exactly.
+///    The search's indentation must also map onto the matched lines' by one
+///    uniform transform — a shift of the base indentation, optionally with
+///    a uniform change of indent unit (tabs for spaces, 2 for 4) — so a
+///    search whose nesting contradicts the file never matches it. The match
+///    must be unique unless `replaceAll` is set. A search whose lines start
+///    with escaped `\t` sequences is retried with those escapes read as
+///    indentation (not for TeX paths).
 ///
 /// Anything else is "not found". There is no similarity-based fallback: a
 /// stale or hallucinated search block must fail rather than land on the most
@@ -22,9 +25,10 @@ import Foundation
 /// Bytes: a literal match splices the replacement verbatim. A lenient match
 /// replaces whole lines; untouched lines keep their own bytes and endings,
 /// the replacement keeps its own bytes when the search's indentation agrees
-/// with the file, and otherwise only its leading whitespace is re-indented
-/// to the matched lines. HTML entities and backslash sequences in the
-/// replacement are never decoded.
+/// with the file, and otherwise only its leading whitespace is re-based by
+/// the same transform. HTML entities and backslash sequences in the
+/// replacement are never decoded here (the engine's escape fallback, which
+/// runs before this, is separate).
 struct TextEditApplier {
 	struct Region: Equatable {
 		/// UTF-8 offset in the input text.
@@ -86,10 +90,14 @@ struct TextEditApplier {
 		return offset + delta
 	}
 
-	/// Whitespace-insensitive comparison key of one line: no leading or
-	/// trailing whitespace, inner whitespace runs collapsed to one space.
+	/// Comparison key of one line: the line without its leading indentation
+	/// and trailing spaces/tabs. Inner whitespace is content and is kept.
 	static func lineMatchKey(_ line: String) -> String {
-		line.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+		let isBlank: (Character) -> Bool = { $0 == " " || $0 == "\t" }
+		guard let first = line.firstIndex(where: { !isBlank($0) }),
+			  let last = line.lastIndex(where: { !isBlank($0) })
+		else { return "" }
+		return String(line[first...last])
 	}
 
 	// MARK: - Literal
@@ -173,8 +181,8 @@ struct TextEditApplier {
 		cursor: Int?
 	) throws -> Outcome {
 		let notFound = replaceAll
-			? "search text not found in file (no literal matches for replace_all, and no block of lines matches it when whitespace is ignored)"
-			: "search block not found in file (no exact match, and no block of lines matches it when whitespace is ignored)"
+			? "search text not found in file (no literal matches for replace_all, and no block of lines matches it when indentation and trailing whitespace are ignored)"
+			: "search block not found in file (no exact match, and no block of lines matches it when indentation and trailing whitespace are ignored)"
 
 		let fileLines = String.splitContentPreservingAllLineEndings(text)
 		let fileKeys = fileLines.map { lineMatchKey($0.line) }
@@ -203,6 +211,26 @@ struct TextEditApplier {
 
 		guard !starts.isEmpty else {
 			throw ApplyEditsError.invalidParams(notFound)
+		}
+
+		// Keep only the candidates whose indentation structure agrees.
+		var transforms: [Int: IndentTransform] = [:]
+		for start in starts {
+			if let transform = IndentTransform(
+				searchLines: searchLines,
+				searchKeys: searchKeys,
+				matchedLines: fileLines[start..<(start + searchLines.count)].map(\.line)
+			) {
+				transforms[start] = transform
+			}
+		}
+		let structurallyMismatched = starts.filter { transforms[$0] == nil }
+		starts = starts.filter { transforms[$0] != nil }
+		guard !starts.isEmpty else {
+			let lines = structurallyMismatched.prefix(5).map { String($0 + 1) }.joined(separator: ", ")
+			throw ApplyEditsError.invalidParams(
+				"\(notFound): lines with this text exist (line \(lines)) but their relative indentation differs from the search's, so replacing them would change the file's structure. Copy the block with its exact indentation."
+			)
 		}
 
 		var lineOffsets: [Int] = []
@@ -258,8 +286,7 @@ struct TextEditApplier {
 			let matched = fileLines[start..<end].map(\.line)
 			let lines = replacementLines(
 				replaceLines,
-				searchLines: searchLines,
-				searchKeys: searchKeys,
+				transform: transforms[start]!,
 				matchedLines: matched,
 				fileIndentStyle: fileIndentStyle
 			)
@@ -306,41 +333,86 @@ struct TextEditApplier {
 		return starts
 	}
 
-	/// The replacement lines to write for one lenient match. When every
-	/// non-blank search line has exactly the indentation of the file line it
-	/// matched, the replacement is written as given. Otherwise each
-	/// replacement line's indentation is mapped from the search's
-	/// indentation to the file's: a width that occurs in the search takes the
-	/// matched line's exact leading whitespace, other widths are shifted (one
-	/// known width) or interpolated (two or more) and written in the file's
-	/// indentation style. Only leading whitespace changes.
+	/// How the search's indentation maps onto the matched file lines:
+	/// `fileWidth = offset + scale × searchWidth` for every non-blank line
+	/// (widths in columns, a tab counting 4). One distinct search width
+	/// allows a pure shift; two or more fix a positive scale (a uniform
+	/// change of indent unit, between ¼ and 4) that every line must satisfy.
+	/// Anything else — a line nested deeper or shallower in the search than
+	/// the file's relative structure — has no transform.
+	struct IndentTransform {
+		let offset: Int
+		/// scale = scaleNumerator / scaleDenominator, kept exact.
+		let scaleNumerator: Int
+		let scaleDenominator: Int
+		/// Search width → the matched line's exact leading whitespace.
+		let anchors: [Int: Substring]
+		/// Every non-blank search line has exactly its file line's indentation.
+		let isIdentity: Bool
+
+		init?(searchLines: [String], searchKeys: [String], matchedLines: [String]) {
+			var pairs: [(search: Int, file: Int)] = []
+			var anchors: [Int: Substring] = [:]
+			var identical = true
+			for index in searchLines.indices where !searchKeys[index].isEmpty {
+				let searchIndent = TextEditApplier.leadingWhitespace(of: searchLines[index])
+				let fileIndent = TextEditApplier.leadingWhitespace(of: matchedLines[index])
+				if searchIndent != fileIndent { identical = false }
+				let searchWidth = TextEditApplier.indentationWidth(searchIndent)
+				if anchors[searchWidth] == nil { anchors[searchWidth] = fileIndent }
+				pairs.append((searchWidth, TextEditApplier.indentationWidth(fileIndent)))
+			}
+			guard let first = pairs.first else { return nil }
+
+			var numerator = 1
+			var denominator = 1
+			if let second = pairs.first(where: { $0.search != first.search }) {
+				numerator = second.file - first.file
+				denominator = second.search - first.search
+				if denominator < 0 {
+					numerator = -numerator
+					denominator = -denominator
+				}
+				// Order-preserving and a plausible unit ratio (¼ … 4).
+				guard numerator > 0, numerator * 4 >= denominator, numerator <= denominator * 4 else { return nil }
+			}
+			for pair in pairs {
+				// (file - file₀) · d == n · (search - search₀)
+				guard (pair.file - first.file) * denominator == numerator * (pair.search - first.search) else {
+					return nil
+				}
+			}
+			self.scaleNumerator = numerator
+			self.scaleDenominator = denominator
+			// offset · d = file₀ · d − n · search₀ (kept scaled to stay exact)
+			self.offset = first.file * denominator - numerator * first.search
+			self.anchors = anchors
+			self.isIdentity = identical
+		}
+
+		func fileWidth(forSearchWidth width: Int) -> Int {
+			let scaled = offset + scaleNumerator * width
+			// Round half up, never below zero.
+			return max(0, (2 * scaled + scaleDenominator) / (2 * scaleDenominator))
+		}
+	}
+
+	/// The replacement lines to write for one lenient match: as given when
+	/// the search's indentation is the file's, otherwise each line's leading
+	/// whitespace re-based by the match's transform — a width the search
+	/// used takes the matched line's exact whitespace, any other width is
+	/// written in the file's indentation style. Only leading whitespace
+	/// changes.
 	private static func replacementLines(
 		_ replaceLines: [String],
-		searchLines: [String],
-		searchKeys: [String],
+		transform: IndentTransform,
 		matchedLines: [String],
 		fileIndentStyle: () -> String
 	) -> [String] {
 		guard !replaceLines.isEmpty else { return [] }
-
-		var anchors: [Int: Substring] = [:]
-		var indentationAgrees = true
-		for index in searchLines.indices where !searchKeys[index].isEmpty {
-			let searchIndent = leadingWhitespace(of: searchLines[index])
-			let fileIndent = leadingWhitespace(of: matchedLines[index])
-			if searchIndent != fileIndent {
-				indentationAgrees = false
-			}
-			let width = indentationWidth(searchIndent)
-			if anchors[width] == nil {
-				anchors[width] = fileIndent
-			}
-		}
-		if indentationAgrees {
+		if transform.isIdentity {
 			return replaceLines
 		}
-
-		let sortedWidths = anchors.keys.sorted()
 		return replaceLines.map { line in
 			let indent = leadingWhitespace(of: line)
 			let content = line.dropFirst(indent.count)
@@ -348,31 +420,16 @@ struct TextEditApplier {
 				return line
 			}
 			let width = indentationWidth(indent)
-			if let exact = anchors[width] {
+			if let exact = transform.anchors[width] {
 				return String(exact) + content
 			}
-			let target: Int
-			if sortedWidths.count == 1 {
-				let only = sortedWidths[0]
-				target = width + indentationWidth(anchors[only]!) - only
-			} else {
-				let low = sortedWidths.first!
-				let high = sortedWidths.last!
-				let fileLow = Double(indentationWidth(anchors[low]!))
-				let fileHigh = Double(indentationWidth(anchors[high]!))
-				// Indent units differ by small factors (2 vs 4 spaces); the
-				// clamp keeps a pathological pair of anchors from turning a
-				// model-supplied width into an unbounded allocation.
-				let scale = min(4, max(0, (fileHigh - fileLow) / Double(high - low)))
-				target = Int((fileLow + Double(width - low) * scale).rounded())
-			}
-			return indentation(ofWidth: max(0, target), style: fileIndentStyle()) + content
+			return indentation(ofWidth: transform.fileWidth(forSearchWidth: width), style: fileIndentStyle()) + content
 		}
 	}
 
 	private static let tabWidth = 4
 
-	private static func indentationWidth<S: StringProtocol>(_ whitespace: S) -> Int {
+	fileprivate static func indentationWidth<S: StringProtocol>(_ whitespace: S) -> Int {
 		whitespace.reduce(0) { $0 + ($1 == "\t" ? tabWidth : 1) }
 	}
 
@@ -383,7 +440,7 @@ struct TextEditApplier {
 		return String(repeating: " ", count: width)
 	}
 
-	private static func leadingWhitespace(of line: String) -> Substring {
+	fileprivate static func leadingWhitespace(of line: String) -> Substring {
 		line.prefix { $0 == " " || $0 == "\t" }
 	}
 
