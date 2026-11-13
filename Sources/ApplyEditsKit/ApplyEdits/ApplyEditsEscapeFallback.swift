@@ -47,7 +47,70 @@ public struct ApplyEditsEscapeFallback {
 			return (search, replace, false)
 		}
 
-		let decodedReplace = decoder.decode(replace, mode: mode)
-		return (decodedSearch, decodedReplace, true)
+		return (decodedSearch, Self.decodeReplacement(replace, likeSearch: search), true)
+	}
+
+	/// The search matched only after decoding, so the payload was probably
+	/// escaped once too often. The replacement is decoded under the same
+	/// assumption, but only as far as the search gives evidence for it:
+	/// - `\n`, `\r`, `\t` are decoded only if the search used that escape
+	///   (a `\tau` or `\temp` in the replacement survives a `\n` search);
+	/// - `\\` and `\"` are decoded, since an over-escaped payload writes every
+	///   literal backslash and quote that way;
+	/// - a replacement that already contains a real newline, carriage return
+	///   or tab for an escape the search used was evidently not over-escaped
+	///   and is used as given.
+	/// A single-line replacement such as `print("\n")` after a `\n` search
+	/// stays ambiguous and is read as over-escaped (one newline).
+	static func decodeReplacement(_ replace: String, likeSearch search: String) -> String {
+		let kinds = escapeKinds(in: search)
+		let scalars = replace.unicodeScalars
+		if (kinds.contains("n") && scalars.contains("\n"))
+			|| (kinds.contains("r") && scalars.contains("\r"))
+			|| (kinds.contains("t") && scalars.contains("\t")) {
+			return replace
+		}
+		var decodable: Set<Character> = ["\\", "\""]
+		decodable.formUnion(kinds.intersection(["n", "r", "t"]))
+
+		var output = ""
+		output.reserveCapacity(replace.utf8.count)
+		var iterator = Array(replace).makeIterator()
+		while let character = iterator.next() {
+			guard character == "\\" else {
+				output.append(character)
+				continue
+			}
+			guard let escaped = iterator.next() else {
+				output.append(character)
+				break
+			}
+			guard decodable.contains(escaped) else {
+				output.append(character)
+				output.append(escaped)
+				continue
+			}
+			switch escaped {
+			case "n": output.append("\n")
+			case "r": output.append("\r")
+			case "t": output.append("\t")
+			default: output.append(escaped)
+			}
+		}
+		return output
+	}
+
+	/// Escape letters (`n`, `r`, `t`, `\\`, `"`) that follow a backslash in
+	/// `text`, reading `\\` as one escape.
+	private static func escapeKinds(in text: String) -> Set<Character> {
+		var kinds: Set<Character> = []
+		var iterator = Array(text).makeIterator()
+		while let character = iterator.next() {
+			guard character == "\\", let escaped = iterator.next() else { continue }
+			if ["n", "r", "t", "\\", "\""].contains(escaped) {
+				kinds.insert(escaped)
+			}
+		}
+		return kinds
 	}
 }

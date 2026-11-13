@@ -662,3 +662,45 @@ extension ApplyEditsMatchingAndFidelityTests {
 		XCTAssertNil(result.note)
 	}
 }
+
+// MARK: - Escape fallback
+
+extension ApplyEditsMatchingAndFidelityTests {
+	func testBatchEscapeFallbackIsResolvedAgainstTheTextTheEditAppliesTo() async throws {
+		let result = try await batch(
+			[
+				ApplyEditsOperation(search: "start", replace: "alpha\nbeta", replaceAll: false),
+				ApplyEditsOperation(search: "alpha\\nbeta", replace: "gamma", replaceAll: false),
+			],
+			in: "start\n"
+		)
+		XCTAssertEqual(result.outcomes?.map(\.status), ["success", "success"])
+		XCTAssertEqual(result.updatedText, "gamma\n")
+	}
+
+	func testEscapeFallbackOnlyDecodesEscapeKindsTheSearchUsed() async throws {
+		// The search needed "\n" decoding; the replacement's "\t" is content.
+		let result = try await single("x\\ny", "\\tau = 1", path: "a.md", in: "x\ny\n")
+		XCTAssertEqual(result.updatedText, "\\tau = 1\n")
+	}
+
+	func testEscapeFallbackLeavesAReplacementWithRealNewlinesAsGiven() async throws {
+		let replacement = "first\nprint(\"\\n\")"
+		let result = try await single("x\\ny", replacement, path: "a.py", in: "x\ny\n")
+		XCTAssertEqual(result.updatedText, replacement + "\n")
+	}
+
+	func testEscapeFallbackDecodesAConsistentlyEscapedReplacement() async throws {
+		// Double-escaped payload: an escaped backslash stays one backslash.
+		let result = try await single("x\\ny", "print(\\\"\\\\n\\\")\\nz", path: "a.py", in: "x\ny\n")
+		XCTAssertEqual(result.updatedText, "print(\"\\n\")\nz\n")
+		XCTAssertTrue(result.note?.contains("escape") == true, result.note ?? "nil")
+	}
+
+	func testEscapeFallbackIsNotUsedWhenTheSearchMatchesAsGiven() async throws {
+		let result = try await single("x = 1", "print(\"\\n\")", path: "a.py", in: "x = 1\n")
+		XCTAssertEqual(result.updatedText, "print(\"\\n\")\n")
+		XCTAssertNil(result.note)
+	}
+}
+

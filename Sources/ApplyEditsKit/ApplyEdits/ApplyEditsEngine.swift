@@ -52,7 +52,7 @@ public struct ApplyEditsEngine {
 				originalText: originalText,
 				updatedText: single.updatedText,
 				diffChunks: single.diffChunks,
-				note: nil,
+				note: single.usedEscapeFallback ? Self.escapeFallbackNote : nil,
 				editsRequested: 1,
 				editsApplied: 1,
 				status: .success,
@@ -75,7 +75,7 @@ public struct ApplyEditsEngine {
 				originalText: originalText,
 				updatedText: single.updatedText,
 				diffChunks: single.diffChunks,
-				note: nil,
+				note: single.usedEscapeFallback ? Self.escapeFallbackNote : nil,
 				editsRequested: 1,
 				editsApplied: 1,
 				status: .success,
@@ -103,14 +103,16 @@ public struct ApplyEditsEngine {
 		replace: String,
 		replaceAll: Bool,
 		treatAsRewrite: Bool
-	) async throws -> (updatedText: String, diffChunks: [DiffChunk]) {
+	) async throws -> (updatedText: String, diffChunks: [DiffChunk], usedEscapeFallback: Bool) {
 		var effectiveSearch = search
 		var effectiveReplace = replace
+		var usedEscapeFallback = false
 		if let search, !treatAsRewrite {
 			let fallback = ApplyEditsEscapeFallback()
 			let resolved = fallback.resolveSingle(search: search, replace: replace, in: originalText)
 			effectiveSearch = resolved.search
 			effectiveReplace = resolved.replace
+			usedEscapeFallback = resolved.usedFallback
 		}
 
 		let generation = try await EditFlowPerf.measure(
@@ -127,7 +129,7 @@ public struct ApplyEditsEngine {
 			)
 		}
 		if let updatedText = generation.updatedText {
-			return (updatedText: updatedText, diffChunks: generation.chunks)
+			return (updatedText: updatedText, diffChunks: generation.chunks, usedEscapeFallback: usedEscapeFallback)
 		}
 		let updatedText = try EditFlowPerf.measure(
 			EditFlowPerf.Stage.ApplyEdits.patchApply,
@@ -139,7 +141,7 @@ public struct ApplyEditsEngine {
 				fileAction: generation.fileAction
 			)
 		}
-		return (updatedText: updatedText, diffChunks: generation.chunks)
+		return (updatedText: updatedText, diffChunks: generation.chunks, usedEscapeFallback: usedEscapeFallback)
 	}
 
 	private func applyBatch(
@@ -153,12 +155,10 @@ public struct ApplyEditsEngine {
 			throw ApplyEditsError.invalidParams("edits array cannot be empty")
 		}
 
-		let fallback = ApplyEditsEscapeFallback()
-		let resolved = fallback.resolveBatch(edits: edits, in: originalText)
-		let effectiveEdits = resolved.edits
-
+		// The escape fallback is resolved per edit, against the text that edit
+		// is applied to (edits apply in sequence).
 		if let literalResult = tryLiteralBatch(
-			edits: effectiveEdits,
+			edits: edits,
 			originalText: originalText,
 			path: path,
 			verbose: verbose,
@@ -168,7 +168,7 @@ public struct ApplyEditsEngine {
 		}
 
 		return applyBatchSequentially(
-			edits: effectiveEdits,
+			edits: edits,
 			originalText: originalText,
 			path: path,
 			verbose: verbose,
@@ -198,6 +198,8 @@ public struct ApplyEditsEngine {
 		outcomes.reserveCapacity(edits.count)
 		var cursors: [String: Int] = [:]
 		var applied = 0
+		var usedEscapeFallback = false
+		let fallback = ApplyEditsEscapeFallback()
 
 		EditFlowPerf.measure(
 			EditFlowPerf.Stage.ApplyEdits.patchApply,
@@ -205,10 +207,11 @@ public struct ApplyEditsEngine {
 		) {
 			for (index, edit) in edits.enumerated() {
 				let takesNextOccurrence = !edit.replaceAll && (searchCounts[edit.search] ?? 0) > 1
+				let resolved = fallback.resolveSingle(search: edit.search, replace: edit.replace, in: text)
 				do {
 					let outcome = try TextEditApplier.apply(
-						search: edit.search,
-						replace: edit.replace,
+						search: resolved.search,
+						replace: resolved.replace,
 						replaceAll: edit.replaceAll,
 						to: text,
 						path: path,
@@ -222,6 +225,7 @@ public struct ApplyEditsEngine {
 					}
 					text = outcome.text
 					applied += 1
+					usedEscapeFallback = usedEscapeFallback || resolved.usedFallback
 					outcomes.append(EditOutcome(index: index, status: "success", error: nil))
 				} catch {
 					outcomes.append(EditOutcome(index: index, status: "failed", error: Self.message(for: error)))
@@ -257,7 +261,7 @@ public struct ApplyEditsEngine {
 			originalText: originalText,
 			updatedText: text,
 			diffChunks: chunks,
-			note: nil,
+			note: usedEscapeFallback ? Self.escapeFallbackNote : nil,
 			editsRequested: edits.count,
 			editsApplied: applied,
 			status: status,
@@ -267,6 +271,9 @@ public struct ApplyEditsEngine {
 			options: options
 		)
 	}
+
+	static let escapeFallbackNote =
+		"The search matched only after decoding backslash escapes (such as \\n); the replacement's escapes of the same kinds were decoded too."
 
 	private static func combinedNote(_ first: String?, _ second: String?) -> String? {
 		switch (first, second) {
@@ -296,8 +303,14 @@ public struct ApplyEditsEngine {
 		var newText = originalText
 		var outcomes: [EditOutcome] = []
 		var appliedCount = 0
+		let fallback = ApplyEditsEscapeFallback()
 
-		for (idx, edit) in edits.enumerated() {
+		for (idx, rawEdit) in edits.enumerated() {
+			let resolved = fallback.resolveSingle(search: rawEdit.search, replace: rawEdit.replace, in: newText)
+			// A literal fast path only: an edit that needs escape decoding is
+			// left to the sequential path, which reports it.
+			guard !resolved.usedFallback else { return nil }
+			let edit = rawEdit
 			let matches = newText.ranges(of: edit.search)
 			if edit.replaceAll {
 				guard !matches.isEmpty else { return nil }
