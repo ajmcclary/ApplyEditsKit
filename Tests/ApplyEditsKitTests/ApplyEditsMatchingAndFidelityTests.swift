@@ -704,3 +704,23 @@ extension ApplyEditsMatchingAndFidelityTests {
 	}
 }
 
+// MARK: - Review round 2
+
+extension ApplyEditsMatchingAndFidelityTests {
+	func testOneLineSearchWithADifferentIndentUnitPlacesNewLinesByTheFileUnit() async throws {
+		let python = "if a:\n    x = 1\n"
+		let result = try await single("  x = 1  ", "  x = 2\ny = 3", path: "m.py", in: python)
+		XCTAssertEqual(result.updatedText, "if a:\n    x = 2\ny = 3\n")
+
+		let go = "func f() {\n\tx := 1\n}\n"
+		let goResult = try await single("  x := 1", "  if y {\n    x := 1\n  }", path: "m.go", in: go)
+		XCTAssertEqual(goResult.updatedText, "func f() {\n\tif y {\n\t\tx := 1\n\t}\n}\n")
+	}
+
+	func testOneLineSearchKeepsTheReplacementsRelativeIndentWhenTheFileUnitIsUnknown() async throws {
+		// One line, so no neighbour shows the file's unit: the replacement's
+		// own relative indent (one tab = 4 columns) is kept on top of the match.
+		let result = try await single("\tx = 1", "\tx = 2\n\t\ty = 3", path: "m.py", in: "    x = 1\n")
+		XCTAssertEqual(result.updatedText, "    x = 2\n        y = 3\n")
+	}
+}

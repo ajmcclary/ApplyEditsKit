@@ -258,7 +258,7 @@ struct TextEditApplier {
 		} else if starts.count > 1 {
 			let lines = starts.map { String($0 + 1) }.joined(separator: ", ")
 			throw ApplyEditsError.invalidParams(
-				"Search block matches multiple locations when whitespace is ignored (lines \(lines)). Please make the block more specific or use replace_all=true."
+				"Search block matches multiple locations when indentation and trailing whitespace are ignored (lines \(lines)). Please make the block more specific or use replace_all=true."
 			)
 		} else {
 			chosen = starts
@@ -288,7 +288,8 @@ struct TextEditApplier {
 				replaceLines,
 				transform: transforms[start]!,
 				matchedLines: matched,
-				fileIndentStyle: fileIndentStyle
+				fileIndentStyle: fileIndentStyle,
+				fileIndentUnit: { indentUnit(around: start..<end, in: fileLines) }
 			)
 
 			var regionStart = lineOffsets[start]
@@ -349,6 +350,14 @@ struct TextEditApplier {
 		let anchors: [Int: Substring]
 		/// Every non-blank search line has exactly its file line's indentation.
 		let isIdentity: Bool
+		/// The search used two or more indentation widths, so `scale` was
+		/// measured. Otherwise only the shift is known (a one-line search, or
+		/// lines all at one level) and the indent unit must come from elsewhere.
+		let hasScaleEvidence: Bool
+		/// The one (search width, file width) pair when there is no scale
+		/// evidence.
+		let baseSearchWidth: Int
+		let baseFileWidth: Int
 
 		init?(searchLines: [String], searchKeys: [String], matchedLines: [String]) {
 			var pairs: [(search: Int, file: Int)] = []
@@ -366,7 +375,8 @@ struct TextEditApplier {
 
 			var numerator = 1
 			var denominator = 1
-			if let second = pairs.first(where: { $0.search != first.search }) {
+			let second = pairs.first(where: { $0.search != first.search })
+			if let second {
 				numerator = second.file - first.file
 				denominator = second.search - first.search
 				if denominator < 0 {
@@ -388,6 +398,9 @@ struct TextEditApplier {
 			self.offset = first.file * denominator - numerator * first.search
 			self.anchors = anchors
 			self.isIdentity = identical
+			self.hasScaleEvidence = second != nil
+			self.baseSearchWidth = first.search
+			self.baseFileWidth = first.file
 		}
 
 		func fileWidth(forSearchWidth width: Int) -> Int {
@@ -403,16 +416,39 @@ struct TextEditApplier {
 	/// used takes the matched line's exact whitespace, any other width is
 	/// written in the file's indentation style. Only leading whitespace
 	/// changes.
+	///
+	/// Without scale evidence (one search indentation width) the search
+	/// cannot say what one indent level is, so a replacement line at another
+	/// depth is placed by its own relative indentation counted in the
+	/// replacement's indent unit (the GCD of its relative widths) and
+	/// converted to the file's unit around the match; when either unit is
+	/// unknown, the relative indentation is kept as written.
 	private static func replacementLines(
 		_ replaceLines: [String],
 		transform: IndentTransform,
 		matchedLines: [String],
-		fileIndentStyle: () -> String
+		fileIndentStyle: () -> String,
+		fileIndentUnit: () -> Int?
 	) -> [String] {
 		guard !replaceLines.isEmpty else { return [] }
 		if transform.isIdentity {
 			return replaceLines
 		}
+
+		var levelRebase: ((Int) -> Int)?
+		if !transform.hasScaleEvidence {
+			let relativeWidths = replaceLines
+				.filter { line in line.contains { $0 != " " && $0 != "\t" } }
+				.map { indentationWidth(leadingWhitespace(of: $0)) - transform.baseSearchWidth }
+			let replacementUnit = relativeWidths.reduce(0) { greatestCommonDivisor($0, abs($1)) }
+			if replacementUnit > 0, let fileUnit = fileIndentUnit() {
+				levelRebase = { width in
+					let relative = width - transform.baseSearchWidth
+					return max(0, transform.baseFileWidth + relative / replacementUnit * fileUnit)
+				}
+			}
+		}
+
 		return replaceLines.map { line in
 			let indent = leadingWhitespace(of: line)
 			let content = line.dropFirst(indent.count)
@@ -423,11 +459,33 @@ struct TextEditApplier {
 			if let exact = transform.anchors[width] {
 				return String(exact) + content
 			}
-			return indentation(ofWidth: transform.fileWidth(forSearchWidth: width), style: fileIndentStyle()) + content
+			let target = levelRebase?(width) ?? transform.fileWidth(forSearchWidth: width)
+			return indentation(ofWidth: target, style: fileIndentStyle()) + content
 		}
 	}
 
 	private static let tabWidth = 4
+
+	private static func greatestCommonDivisor(_ a: Int, _ b: Int) -> Int {
+		b == 0 ? a : greatestCommonDivisor(b, a % b)
+	}
+
+	/// The indent unit (in columns) the matched lines and their neighbours
+	/// use: the GCD of the non-zero indentation widths within 50 lines of
+	/// the match, or `nil` if that is below 2 or there are none.
+	private static func indentUnit(
+		around range: Range<Int>,
+		in fileLines: [(line: String, ending: String)]
+	) -> Int? {
+		let window = max(0, range.lowerBound - 50)..<min(fileLines.count, range.upperBound + 50)
+		var unit = 0
+		for index in window {
+			let line = fileLines[index].line
+			guard line.contains(where: { $0 != " " && $0 != "\t" }) else { continue }
+			unit = greatestCommonDivisor(unit, indentationWidth(leadingWhitespace(of: line)))
+		}
+		return unit >= 2 ? unit : nil
+	}
 
 	fileprivate static func indentationWidth<S: StringProtocol>(_ whitespace: S) -> Int {
 		whitespace.reduce(0) { $0 + ($1 == "\t" ? tabWidth : 1) }
