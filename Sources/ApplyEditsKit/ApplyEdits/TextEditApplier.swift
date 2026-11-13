@@ -41,6 +41,9 @@ struct TextEditApplier {
 		let text: String
 		/// Replaced regions of the input text, ascending and disjoint.
 		let regions: [Region]
+		/// Something the caller must be told, e.g. occurrences a lenient
+		/// replace_all left alone.
+		var note: String? = nil
 	}
 
 	/// - Parameter firstMatchAtOrAfter: batch cursor for repeated identical
@@ -316,7 +319,17 @@ struct TextEditApplier {
 			output += entry.line
 			output += entry.ending
 		}
-		return Outcome(text: output, regions: regions)
+		var note: String?
+		if replaceAll, !structurallyMismatched.isEmpty {
+			let skipped = structurallyMismatched.count
+			let lines = structurallyMismatched.prefix(10).map { String($0 + 1) }.joined(separator: ", ")
+				+ (skipped > 10 ? ", …" : "")
+			let replaced = chosen.count == 1 ? "1 occurrence" : "\(chosen.count) occurrences"
+			note = skipped == 1
+				? "replace_all replaced \(replaced); 1 similar block (line \(lines)) was left unchanged because its indentation structure differs from the search's."
+				: "replace_all replaced \(replaced); \(skipped) similar blocks (lines \(lines)) were left unchanged because their indentation structure differs from the search's."
+		}
+		return Outcome(text: output, regions: regions, note: note)
 	}
 
 	private static func matchStarts(of searchKeys: [String], in fileKeys: [String]) -> [Int] {

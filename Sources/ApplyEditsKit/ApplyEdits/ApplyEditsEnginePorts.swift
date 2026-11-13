@@ -32,11 +32,15 @@ public struct DiffChunkGeneration: Sendable {
 	/// The text the edit produces, byte for byte, or `nil` when the
 	/// generator only produced chunks.
 	public let updatedText: String?
+	/// Something the result must tell the caller (for example occurrences a
+	/// replace_all left alone); surfaced as `ApplyEditsResult.note`.
+	public let note: String?
 
-	public init(chunks: [DiffChunk], fileAction: FileAction, updatedText: String?) {
+	public init(chunks: [DiffChunk], fileAction: FileAction, updatedText: String?, note: String? = nil) {
 		self.chunks = chunks
 		self.fileAction = fileAction
 		self.updatedText = updatedText
+		self.note = note
 	}
 }
 

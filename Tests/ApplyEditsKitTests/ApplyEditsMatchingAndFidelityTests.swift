@@ -731,4 +731,36 @@ extension ApplyEditsMatchingAndFidelityTests {
 		)
 		XCTAssertTrue(result.unifiedDiff?.contains("-\tb\n+    b\n") == true, result.unifiedDiff ?? "nil")
 	}
+
+	func testLenientReplaceAllReportsBlocksSkippedForTheirStructure() async throws {
+		let python = "if a:\n    go()\nif b:\n        go()\nif c:\ngo()\n"
+		let result = try await single("\tif b:\n\t\tgo()", "\tif b:\n\t\tstop()", replaceAll: true, path: "m.py", in: "x\n" + python.replacingOccurrences(of: "if a:", with: "if b:").replacingOccurrences(of: "if c:", with: "if b:"))
+		XCTAssertEqual(result.updatedText, "x\nif b:\n    stop()\nif b:\n        stop()\nif b:\ngo()\n")
+		let note = try XCTUnwrap(result.note)
+		XCTAssertTrue(note.contains("replaced 2"), note)
+		XCTAssertTrue(note.contains("1 similar block") && note.contains("line 6"), note)
+		XCTAssertTrue(note.contains("indentation"), note)
+	}
+
+	func testBatchLenientReplaceAllReportsSkippedBlocksPerEdit() async throws {
+		let original = "if b:\n    go()\nif b:\ngo()\nend\n"
+		let result = try await batch(
+			[
+				ApplyEditsOperation(search: "end", replace: "END", replaceAll: false),
+				ApplyEditsOperation(search: "\tif b:\n\t\tgo()", replace: "\tif b:\n\t\tstop()", replaceAll: true),
+			],
+			path: "m.py",
+			in: original
+		)
+		XCTAssertEqual(result.updatedText, "if b:\n    stop()\nif b:\ngo()\nEND\n")
+		let note = try XCTUnwrap(result.note)
+		XCTAssertTrue(note.contains("Edit 2: replace_all replaced 1 occurrence; 1 similar block (line 3)"), note)
+	}
+
+	func testLenientReplaceAllWithNothingSkippedHasNoNote() async throws {
+		let original = "if x {\n    go()\n}\nfunc f() {\n    if y {\n        go()\n    }\n}\n"
+		let result = try await single("\tgo()", "\tstop()", replaceAll: true, path: "f.swift", in: original)
+		XCTAssertNil(result.note)
+	}
 }
+

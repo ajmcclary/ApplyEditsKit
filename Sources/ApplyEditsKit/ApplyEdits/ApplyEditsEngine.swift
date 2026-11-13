@@ -52,7 +52,7 @@ public struct ApplyEditsEngine {
 				originalText: originalText,
 				updatedText: single.updatedText,
 				diffChunks: single.diffChunks,
-				note: single.usedEscapeFallback ? Self.escapeFallbackNote : nil,
+				note: single.note,
 				editsRequested: 1,
 				editsApplied: 1,
 				status: .success,
@@ -75,7 +75,7 @@ public struct ApplyEditsEngine {
 				originalText: originalText,
 				updatedText: single.updatedText,
 				diffChunks: single.diffChunks,
-				note: single.usedEscapeFallback ? Self.escapeFallbackNote : nil,
+				note: single.note,
 				editsRequested: 1,
 				editsApplied: 1,
 				status: .success,
@@ -103,7 +103,7 @@ public struct ApplyEditsEngine {
 		replace: String,
 		replaceAll: Bool,
 		treatAsRewrite: Bool
-	) async throws -> (updatedText: String, diffChunks: [DiffChunk], usedEscapeFallback: Bool) {
+	) async throws -> (updatedText: String, diffChunks: [DiffChunk], note: String?) {
 		var effectiveSearch = search
 		var effectiveReplace = replace
 		var usedEscapeFallback = false
@@ -128,8 +128,9 @@ public struct ApplyEditsEngine {
 				treatAsRewrite: treatAsRewrite
 			)
 		}
+		let note = Self.combinedNote(usedEscapeFallback ? Self.escapeFallbackNote : nil, generation.note)
 		if let updatedText = generation.updatedText {
-			return (updatedText: updatedText, diffChunks: generation.chunks, usedEscapeFallback: usedEscapeFallback)
+			return (updatedText: updatedText, diffChunks: generation.chunks, note: note)
 		}
 		let updatedText = try EditFlowPerf.measure(
 			EditFlowPerf.Stage.ApplyEdits.patchApply,
@@ -141,7 +142,7 @@ public struct ApplyEditsEngine {
 				fileAction: generation.fileAction
 			)
 		}
-		return (updatedText: updatedText, diffChunks: generation.chunks, usedEscapeFallback: usedEscapeFallback)
+		return (updatedText: updatedText, diffChunks: generation.chunks, note: note)
 	}
 
 	private func applyBatch(
@@ -199,6 +200,7 @@ public struct ApplyEditsEngine {
 		var cursors: [String: Int] = [:]
 		var applied = 0
 		var usedEscapeFallback = false
+		var editNotes: [String] = []
 		let fallback = ApplyEditsEscapeFallback()
 
 		EditFlowPerf.measure(
@@ -226,6 +228,9 @@ public struct ApplyEditsEngine {
 					text = outcome.text
 					applied += 1
 					usedEscapeFallback = usedEscapeFallback || resolved.usedFallback
+					if let note = outcome.note {
+						editNotes.append("Edit \(index + 1): \(note)")
+					}
 					outcomes.append(EditOutcome(index: index, status: "success", error: nil))
 				} catch {
 					outcomes.append(EditOutcome(index: index, status: "failed", error: Self.message(for: error)))
@@ -261,7 +266,10 @@ public struct ApplyEditsEngine {
 			originalText: originalText,
 			updatedText: text,
 			diffChunks: chunks,
-			note: usedEscapeFallback ? Self.escapeFallbackNote : nil,
+			note: Self.combinedNote(
+				usedEscapeFallback ? Self.escapeFallbackNote : nil,
+				editNotes.isEmpty ? nil : editNotes.joined(separator: " ")
+			),
 			editsRequested: edits.count,
 			editsApplied: applied,
 			status: status,
@@ -487,16 +495,16 @@ public struct DefaultDiffChunkGenerator: DiffChunkGenerator {
 		treatAsRewrite: Bool
 	) async throws -> DiffChunkGeneration {
 		let searchRaw = treatAsRewrite ? "" : (search ?? "")
-		let updatedText = try TextEditApplier.apply(
+		let outcome = try TextEditApplier.apply(
 			search: searchRaw,
 			replace: replace,
 			replaceAll: replaceAll,
 			to: originalText,
 			path: filePath
-		).text
-		let chunks = ApplyEditsDisplayDiff.chunks(original: originalText, updated: updatedText)
+		)
+		let chunks = ApplyEditsDisplayDiff.chunks(original: originalText, updated: outcome.text)
 		let action: FileAction = searchRaw.isEmpty ? .rewrite : .modify
-		return DiffChunkGeneration(chunks: chunks, fileAction: action, updatedText: updatedText)
+		return DiffChunkGeneration(chunks: chunks, fileAction: action, updatedText: outcome.text, note: outcome.note)
 	}
 }
 
