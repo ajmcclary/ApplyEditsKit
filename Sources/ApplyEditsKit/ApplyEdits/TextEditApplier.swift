@@ -540,17 +540,27 @@ struct TextEditApplier {
 /// Diff chunks shown for an edit. Lines are compared with their line
 /// endings, so every byte that changes is shown: trailing whitespace,
 /// indentation, a final newline or a line ending. Chunks carry the lines
-/// indentation-encoded with the original's detected style (trailing
-/// whitespace kept); the tool-card variant carries the raw lines.
+/// indentation-encoded so that decoding gives back the exact line; the
+/// tool-card variant carries the raw lines.
 enum ApplyEditsDisplayDiff {
 	static func chunks(original: String, updated: String) -> [DiffChunk] {
 		let old = String.splitContentPreservingAllLineEndings(original)
 		let new = String.splitContentPreservingAllLineEndings(updated)
 		let indentType = String.detectIndentationTypeFromLines(old.map(\.line)).type
+		// Lossless encoding, so the rendered diff shows indentation changes:
+		// spaces stay <sN>, tabs stay <tN> whatever the file's style, and a
+		// mixed run is carried verbatim after a zero tag.
 		let display: (String) -> String = { line in
-			let encoded = String.encodeIndentationWithConversion(line, desiredIndentationType: indentType)
-			let hasContent = line.contains { $0 != " " && $0 != "\t" }
-			return hasContent ? encoded + trailingWhitespace(of: line) : encoded
+			let indent = line.prefix { $0 == " " || $0 == "\t" }
+			let rest = line.dropFirst(indent.count)
+			if indent.isEmpty {
+				return "<\(indentType)0>" + rest
+			} else if indent.allSatisfy({ $0 == " " }) {
+				return "<s\(indent.count)>" + rest
+			} else if indent.allSatisfy({ $0 == "\t" }) {
+				return "<t\(indent.count)>" + rest
+			}
+			return "<\(indentType)0>" + line
 		}
 		return DiffGenerationUtility.generateRewriteDiff(edits: edits(old: old, new: new, display: display))
 	}
@@ -592,9 +602,5 @@ enum ApplyEditsDisplayDiff {
 				return DiffEdit(type: .addition, lines: [display(new[newIndex].line)])
 			}
 		}
-	}
-
-	private static func trailingWhitespace(of line: String) -> String {
-		String(line.reversed().prefix { $0 == " " || $0 == "\t" }.reversed())
 	}
 }

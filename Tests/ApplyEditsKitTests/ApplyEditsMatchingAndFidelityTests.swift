@@ -723,4 +723,12 @@ extension ApplyEditsMatchingAndFidelityTests {
 		let result = try await single("\tx = 1", "\tx = 2\n\t\ty = 3", path: "m.py", in: "    x = 1\n")
 		XCTAssertEqual(result.updatedText, "    x = 2\n        y = 3\n")
 	}
+
+	func testVerboseDiffShowsATabToSpacesChange() async throws {
+		let result = try await engine.apply(
+			request: ApplyEditsRequest(path: "f.txt", mode: .single(search: "\tb", replace: "    b", replaceAll: false), verbose: true),
+			to: "a\n\tb\n"
+		)
+		XCTAssertTrue(result.unifiedDiff?.contains("-\tb\n+    b\n") == true, result.unifiedDiff ?? "nil")
+	}
 }
