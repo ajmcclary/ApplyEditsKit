@@ -1,7 +1,7 @@
 import Foundation
 
 /// One-line verdict for every edit attempt (multi-edit only)
-public struct EditOutcome: Codable, Equatable {
+public struct EditOutcome: Codable, Equatable, Sendable {
 	public let index : Int              // position in the `edits` array (0 for single-edit)
 	public let status: String           // "success" | "failed"
 	public let error : String?          // present when status == "failed"

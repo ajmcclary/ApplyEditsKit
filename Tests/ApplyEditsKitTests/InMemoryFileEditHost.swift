@@ -29,4 +29,9 @@ actor InMemoryFileEditHost: FileEditHost {
 	func currentText(path: String) async -> String? {
 		files[path]
 	}
+
+	/// Simulates a change made outside the edit flow (a user save, another tool).
+	func setText(path: String, text: String?) {
+		files[path] = text
+	}
 }

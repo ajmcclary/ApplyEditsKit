@@ -1,12 +1,12 @@
 import Foundation
 
-public enum ApplyEditsStatus: String, Equatable {
+public enum ApplyEditsStatus: String, Equatable, Sendable {
 	case success
 	case partial
 	case failed
 }
 
-public struct ApplyEditsStats: Equatable {
+public struct ApplyEditsStats: Equatable, Sendable {
 	public let linesChanged: Int
 	public let chunks: Int
 
@@ -26,7 +26,7 @@ public struct ApplyEditsLineStats: Equatable {
 	}
 }
 
-public struct ApplyEditsResult: Equatable {
+public struct ApplyEditsResult: Equatable, Sendable {
 	public let updatedText: String
 	public let diffChunks: [DiffChunk]
 	public let unifiedDiff: String?

@@ -520,11 +520,89 @@ extension ApplyEditsMatchingAndFidelityTests {
 			verbose: false
 		)
 		await XCTAssertThrowsErrorAsync(try await service.run(request)) { error in
-			guard case ApplyEditsError.invalidParams(let message) = error else {
-				return XCTFail("Expected invalidParams, got \(error)")
-			}
-			XCTAssertTrue(message.contains("changed"), message)
+			XCTAssertEqual(error as? ApplyEditsFileChangedError, ApplyEditsFileChangedError(path: "file.swift", reason: .contentChanged))
+			XCTAssertTrue((error as? LocalizedError)?.errorDescription?.contains("changed") == true)
 		}
+		let writes = await host.writes
+		XCTAssertTrue(writes.isEmpty)
+	}
+}
+
+// MARK: - Prepare, then commit
+
+extension ApplyEditsMatchingAndFidelityTests {
+	private func singleRequest(_ search: String, _ replace: String, path: String = "file.swift") -> ApplyEditsRequest {
+		ApplyEditsRequest(path: path, mode: .single(search: search, replace: replace, replaceAll: false), verbose: false)
+	}
+
+	func testPreparedEditCarriesTheIdentityOfItsBaseAndCommitWritesIt() async throws {
+		let host = InMemoryFileEditHost(files: ["file.swift": "Hello\n"])
+		let service = ApplyEditsService(engine: .default, host: host)
+
+		let prepared = try await service.prepare(singleRequest("Hello", "Hi"))
+		XCTAssertEqual(prepared.path, "file.swift")
+		XCTAssertEqual(prepared.base, ApplyEditsBaseIdentity(text: "Hello\n"))
+		XCTAssertNotEqual(prepared.base, ApplyEditsBaseIdentity(text: "Hello\r\n"))
+		XCTAssertEqual(prepared.result.updatedText, "Hi\n")
+		let writesBeforeCommit = await host.writes
+		XCTAssertTrue(writesBeforeCommit.isEmpty)
+
+		let committed = try await service.commit(prepared)
+		XCTAssertEqual(committed.status, .success)
+		XCTAssertFalse(committed.fileCreated)
+		let stored = await host.currentText(path: "file.swift")
+		XCTAssertEqual(stored, "Hi\n")
+	}
+
+	func testCommitRefusesWhenTheFileChangedSincePreview() async throws {
+		let host = InMemoryFileEditHost(files: ["file.swift": "Hello\n"])
+		let service = ApplyEditsService(engine: .default, host: host)
+		let prepared = try await service.prepare(singleRequest("Hello", "Hi"))
+
+		await host.setText(path: "file.swift", text: "Hello\nuser line\n")
+		await XCTAssertThrowsErrorAsync(try await service.commit(prepared)) { error in
+			XCTAssertEqual(error as? ApplyEditsFileChangedError, ApplyEditsFileChangedError(path: "file.swift", reason: .contentChanged))
+		}
+
+		await host.setText(path: "file.swift", text: nil)
+		await XCTAssertThrowsErrorAsync(try await service.commit(prepared)) { error in
+			XCTAssertEqual(error as? ApplyEditsFileChangedError, ApplyEditsFileChangedError(path: "file.swift", reason: .fileDeleted))
+		}
+		let writes = await host.writes
+		XCTAssertTrue(writes.isEmpty)
+	}
+
+	func testCommitOfACreateRefusesWhenTheFileAppearedSincePreview() async throws {
+		let host = InMemoryFileEditHost()
+		let service = ApplyEditsService(engine: .default, host: host)
+		let prepared = try await service.prepare(
+			ApplyEditsRequest(path: "new.swift", mode: .rewrite(newText: "new\n", onMissing: .create), verbose: false)
+		)
+		XCTAssertNil(prepared.base)
+
+		await host.setText(path: "new.swift", text: "someone else\n")
+		await XCTAssertThrowsErrorAsync(try await service.commit(prepared)) { error in
+			XCTAssertEqual(error as? ApplyEditsFileChangedError, ApplyEditsFileChangedError(path: "new.swift", reason: .fileCreated))
+		}
+		let stored = await host.currentText(path: "new.swift")
+		XCTAssertEqual(stored, "someone else\n")
+
+		await host.setText(path: "new.swift", text: nil)
+		let created = try await service.commit(prepared)
+		XCTAssertTrue(created.fileCreated)
+		let written = await host.currentText(path: "new.swift")
+		XCTAssertEqual(written, "new\n")
+	}
+
+	func testCommitOfAnEditThatAppliedNothingWritesNothing() async throws {
+		let host = InMemoryFileEditHost(files: ["file.swift": "One\n"])
+		let service = ApplyEditsService(engine: .default, host: host)
+		let prepared = try await service.prepare(
+			ApplyEditsRequest(path: "file.swift", mode: .batch([ApplyEditsOperation(search: "Missing", replace: "X", replaceAll: false)]), verbose: false)
+		)
+		await host.setText(path: "file.swift", text: "changed\n")
+		let result = try await service.commit(prepared)
+		XCTAssertEqual(result.status, .failed)
 		let writes = await host.writes
 		XCTAssertTrue(writes.isEmpty)
 	}
