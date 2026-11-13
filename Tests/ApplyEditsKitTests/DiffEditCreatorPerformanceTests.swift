@@ -55,4 +55,58 @@ final class DiffEditCreatorPerformanceTests: XCTestCase {
 		XCTAssertTrue(result.updatedText.contains("\nLINE 20000\n"))
 		XCTAssertLessThan(Date().timeIntervalSince(start), 2.0)
 	}
+
+	func testManyScatteredChangesBeyondTheEditDistanceCapStillDiffPrecisely() {
+		let old = (0..<4_000).map { "line \($0)" }
+		var new = old
+		for index in stride(from: 0, to: new.count, by: 3) {
+			new[index] = "changed \(index)"
+		}
+		let start = Date()
+		let edits = DiffEditCreator.myersDiff(oldLines: old, newLines: new)
+		XCTAssertLessThan(Date().timeIntervalSince(start), 5.0)
+		XCTAssertEqual(edits.filter { $0.type == .deletion }.count, 1_334)
+		XCTAssertEqual(edits.filter { $0.type == .addition }.count, 1_334)
+		XCTAssertEqual(edits.filter { $0.type != .addition }.flatMap(\.lines), old)
+		XCTAssertEqual(edits.filter { $0.type != .deletion }.flatMap(\.lines), new)
+	}
+
+	func testReplaceAllTouchingAThirdOfALargeFileReportsOnlyTheChangedLines() async throws {
+		let original = (0..<4_000).map { $0 % 3 == 0 ? "call old(\($0))" : "keep \($0)" }.joined(separator: "\n") + "\n"
+		let result = try await ApplyEditsEngine.default.apply(
+			request: ApplyEditsRequest(path: "f.txt", mode: .single(search: "old(", replace: "new(", replaceAll: true), verbose: false),
+			to: original
+		)
+		XCTAssertEqual(result.stats?.linesChanged, 1_334)
+	}
+
+	func testEditScriptsReconstructBothSidesForRandomInputs() {
+		var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+		func next(_ bound: Int) -> Int {
+			state = state &* 6364136223846793005 &+ 1442695040888963407
+			return Int((state >> 33) % UInt64(bound))
+		}
+		func check(_ old: [String], _ new: [String]) {
+			let edits = DiffEditCreator.myersDiff(oldLines: old, newLines: new)
+			XCTAssertEqual(edits.filter { $0.type != .addition }.flatMap(\.lines), old)
+			XCTAssertEqual(edits.filter { $0.type != .deletion }.flatMap(\.lines), new)
+		}
+		for _ in 0..<500 {
+			let old = (0..<next(12)).map { _ in String(next(4)) }
+			let new = (0..<next(12)).map { _ in String(next(4)) }
+			check(old, new)
+		}
+		for alphabet in [50, 3_000, 20_000] {
+			let old = (0..<6_000).map { _ in "w\(next(alphabet))" }
+			var new = old
+			for _ in 0..<3_000 {
+				switch next(3) {
+				case 0: new[next(new.count)] = "x\(next(alphabet))"
+				case 1: new.insert("y\(next(alphabet))", at: next(new.count))
+				default: if new.count > 1 { new.remove(at: next(new.count)) }
+				}
+			}
+			check(old, new)
+		}
+	}
 }
