@@ -607,3 +607,58 @@ extension ApplyEditsMatchingAndFidelityTests {
 		XCTAssertTrue(writes.isEmpty)
 	}
 }
+
+// MARK: - The display diff shows every change that is written
+
+extension ApplyEditsMatchingAndFidelityTests {
+	private func verboseSingle(_ search: String, _ replace: String, in text: String) async throws -> ApplyEditsResult {
+		try await engine.apply(
+			request: ApplyEditsRequest(path: "f.txt", mode: .single(search: search, replace: replace, replaceAll: false), verbose: true),
+			to: text
+		)
+	}
+
+	func testTrailingWhitespaceRemovalIsShownInTheDiff() async throws {
+		let result = try await verboseSingle("a   \n", "a\n", in: "a   \nb\n")
+		XCTAssertFalse(result.diffChunks.isEmpty)
+		XCTAssertEqual(result.stats?.linesChanged, 1)
+		XCTAssertTrue(result.toolCardUnifiedDiff?.contains("-a   \n+a\n") == true, result.toolCardUnifiedDiff ?? "nil")
+		XCTAssertTrue(result.unifiedDiff?.contains("-a   \n+a\n") == true, result.unifiedDiff ?? "nil")
+	}
+
+	func testTabToSpacesIsShownInTheDiff() async throws {
+		let result = try await verboseSingle("\tb", "    b", in: "a\n\tb\n")
+		XCTAssertEqual(result.stats?.linesChanged, 1)
+		XCTAssertTrue(result.toolCardUnifiedDiff?.contains("-\tb\n+    b\n") == true, result.toolCardUnifiedDiff ?? "nil")
+	}
+
+	func testLineEndingOnlyRewriteIsShownAndExplained() async throws {
+		let result = try await engine.apply(
+			request: ApplyEditsRequest(path: "f.txt", mode: .rewrite(newText: "x\ny\n", onMissing: .error), verbose: true),
+			to: "x\r\ny\r\n"
+		)
+		XCTAssertEqual(result.stats?.linesChanged, 2)
+		XCTAssertNotNil(result.toolCardUnifiedDiff)
+		XCTAssertTrue(result.note?.contains("line endings") == true, result.note ?? "nil")
+	}
+
+	func testAddingAFinalNewlineIsShownInTheDiff() async throws {
+		let result = try await engine.apply(
+			request: ApplyEditsRequest(path: "f.txt", mode: .rewrite(newText: "x\ny\n", onMissing: .error), verbose: true),
+			to: "x\ny"
+		)
+		XCTAssertEqual(result.stats?.linesChanged, 1)
+		XCTAssertNotNil(result.toolCardUnifiedDiff)
+	}
+
+	func testVerboseDiffOfALineWithNULIsNotTruncated() async throws {
+		let result = try await verboseSingle("a\0b", "a\0B", in: "a\0b\n")
+		XCTAssertTrue(result.unifiedDiff?.contains("+a\0B") == true, result.unifiedDiff ?? "nil")
+	}
+
+	func testEditInAMixedEndingFileShowsOnlyTheChangedLine() async throws {
+		let result = try await verboseSingle("c", "C", in: "a\nb\r\nc\nd\r\n")
+		XCTAssertEqual(result.stats?.linesChanged, 1)
+		XCTAssertNil(result.note)
+	}
+}

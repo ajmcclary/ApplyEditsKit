@@ -268,6 +268,15 @@ public struct ApplyEditsEngine {
 		)
 	}
 
+	private static func combinedNote(_ first: String?, _ second: String?) -> String? {
+		switch (first, second) {
+		case let (first?, second?): return first + " " + second
+		case let (first?, nil): return first
+		case let (nil, second?): return second
+		case (nil, nil): return nil
+		}
+	}
+
 	private static func message(for error: Error) -> String {
 		switch error {
 		case ApplyEditsError.invalidParams(let message), ApplyEditsError.internalError(let message):
@@ -338,7 +347,15 @@ public struct ApplyEditsEngine {
 		verbose: Bool,
 		options: ApplyEditsExecutionOptions
 	) -> ApplyEditsResult {
-		let filteredChunks = UnifiedDiffGenerator.removeWhitespaceOnlyChanges(from: diffChunks)
+		// Chunks are derived from the exact text written, so a whitespace-
+		// only change is a real change and is shown, not filtered out.
+		let filteredChunks = diffChunks
+		let note = Self.combinedNote(
+			note,
+			ApplyEditsDisplayDiff.onlyLineEndingsDiffer(original: originalText, updated: updatedText)
+				? "Only line endings changed; the diff shows the lines whose ending changed."
+				: nil
+		)
 		let stats: ApplyEditsStats?
 		if filteredChunks.isEmpty {
 			stats = nil
@@ -399,14 +416,10 @@ public struct ApplyEditsEngine {
 		guard !fallbackChunks.isEmpty else { return nil }
 
 		let contextLines = 2
-		let oldLines = String.splitContentPreservingLineEndings(originalText).0
-		let newLines = String.splitContentPreservingLineEndings(updatedText).0
-		let contextualChunks = UnifiedDiffGenerator.removeWhitespaceOnlyChanges(
-			from: UnifiedDiffGenerator.diffChunks(
-				oldLines: oldLines,
-				newLines: newLines,
-				context: contextLines
-			)
+		let contextualChunks = ApplyEditsDisplayDiff.toolCardChunks(
+			original: originalText,
+			updated: updatedText,
+			context: contextLines
 		)
 
 		if !contextualChunks.isEmpty {

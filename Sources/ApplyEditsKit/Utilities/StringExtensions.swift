@@ -297,8 +297,10 @@ public extension String {
 	}
 	
 	public static func decodeIndentation(_ encodedLine: String) -> String {
-		let parts = encodedLine.split(separator: ">", maxSplits: 1) // anchor placeholder
-		_ = parts                                                  // silence unused-var warning
+		if encodedLine.utf8.contains(0) {
+			// The C helper is NUL-terminated and would cut the line at the NUL.
+			return decodeIndentationInSwift(encodedLine)
+		}
 		return encodedLine.withCString { cLine in
 			guard let raw = repo_decode_indentation(cLine) else {
 				return encodedLine
@@ -308,6 +310,22 @@ public extension String {
 		}
 	}
 	
+	/// Same rules as `repo_decode_indentation`: a leading `<sN>` / `<tN>`
+	/// tag (N all digits, at most 1,000,000) becomes N spaces / tabs; any
+	/// other line is returned unchanged.
+	private static func decodeIndentationInSwift(_ encodedLine: String) -> String {
+		guard encodedLine.hasPrefix("<s") || encodedLine.hasPrefix("<t"),
+			  let close = encodedLine.firstIndex(of: ">")
+		else { return encodedLine }
+		let typeIndex = encodedLine.index(after: encodedLine.startIndex)
+		let digits = encodedLine[encodedLine.index(after: typeIndex)..<close]
+		guard !digits.isEmpty, digits.count < 20, digits.allSatisfy({ $0.isASCII && $0.isNumber }),
+			  let count = Int(digits), count <= 1_000_000
+		else { return encodedLine }
+		let unit = encodedLine[typeIndex] == "s" ? " " : "\t"
+		return String(repeating: unit, count: count) + encodedLine[encodedLine.index(after: close)...]
+	}
+
 	public static func decodeIndentationPreservingAllLineEndings(_ content: String) -> String {
 		let linesWithEndings = splitContentPreservingAllLineEndings(content)
 		let decoded: [String] = linesWithEndings.map { pair in

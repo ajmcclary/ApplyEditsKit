@@ -479,19 +479,64 @@ struct TextEditApplier {
 	}
 }
 
-/// Diff chunks shown for an edit: the original and the updated text, both
-/// indentation-encoded with the original's detected style, diffed line by
-/// line. Line endings are not part of the comparison.
+/// Diff chunks shown for an edit. Lines are compared with their line
+/// endings, so every byte that changes is shown: trailing whitespace,
+/// indentation, a final newline or a line ending. Chunks carry the lines
+/// indentation-encoded with the original's detected style (trailing
+/// whitespace kept); the tool-card variant carries the raw lines.
 enum ApplyEditsDisplayDiff {
 	static func chunks(original: String, updated: String) -> [DiffChunk] {
-		let (originalLines, _) = String.splitContentPreservingLineEndings(original)
-		let (indentType, _) = String.detectIndentationTypeFromLines(originalLines)
-		let encodedOriginal = originalLines.map {
-			String.encodeIndentationWithConversion($0, desiredIndentationType: indentType)
+		let old = String.splitContentPreservingAllLineEndings(original)
+		let new = String.splitContentPreservingAllLineEndings(updated)
+		let indentType = String.detectIndentationTypeFromLines(old.map(\.line)).type
+		let display: (String) -> String = { line in
+			let encoded = String.encodeIndentationWithConversion(line, desiredIndentationType: indentType)
+			let hasContent = line.contains { $0 != " " && $0 != "\t" }
+			return hasContent ? encoded + trailingWhitespace(of: line) : encoded
 		}
-		let encodedUpdated = String.splitContentPreservingLineEndings(updated).0.map {
-			String.encodeIndentationWithConversion($0, desiredIndentationType: indentType)
+		return DiffGenerationUtility.generateRewriteDiff(edits: edits(old: old, new: new, display: display))
+	}
+
+	static func toolCardChunks(original: String, updated: String, context: Int) -> [DiffChunk] {
+		let old = String.splitContentPreservingAllLineEndings(original)
+		let new = String.splitContentPreservingAllLineEndings(updated)
+		return UnifiedDiffGenerator.hunks(from: edits(old: old, new: new, display: { $0 }), context: context)
+	}
+
+	/// The texts differ, but only in line endings (including the final one).
+	static func onlyLineEndingsDiffer(original: String, updated: String) -> Bool {
+		guard original != updated else { return false }
+		return String.splitContentPreservingAllLineEndings(original).map(\.line)
+			== String.splitContentPreservingAllLineEndings(updated).map(\.line)
+	}
+
+	private static func edits(
+		old: [(line: String, ending: String)],
+		new: [(line: String, ending: String)],
+		display: (String) -> String
+	) -> [DiffEdit] {
+		let keyed = DiffEditCreator.myersDiff(
+			oldLines: old.map { $0.line + $0.ending },
+			newLines: new.map { $0.line + $0.ending }
+		)
+		var oldIndex = 0
+		var newIndex = 0
+		return keyed.map { edit in
+			switch edit.type {
+			case .equal:
+				defer { oldIndex += 1; newIndex += 1 }
+				return DiffEdit(type: .equal, lines: [display(old[oldIndex].line)])
+			case .deletion:
+				defer { oldIndex += 1 }
+				return DiffEdit(type: .deletion, lines: [display(old[oldIndex].line)])
+			case .addition:
+				defer { newIndex += 1 }
+				return DiffEdit(type: .addition, lines: [display(new[newIndex].line)])
+			}
 		}
-		return DiffGenerationUtility.generateRewriteDiff(fileContent: encodedOriginal, newContent: encodedUpdated)
+	}
+
+	private static func trailingWhitespace(of line: String) -> String {
+		String(line.reversed().prefix { $0 == " " || $0 == "\t" }.reversed())
 	}
 }

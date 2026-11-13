@@ -162,7 +162,12 @@ public class DiffGenerationUtility {
 	}
 	
 	public static func generateRewriteDiff(fileContent: [String], newContent: [String]) -> [DiffChunk] {
-		let diffEdits = DiffEditCreator.myersDiff(oldLines: fileContent, newLines: newContent)
+		generateRewriteDiff(edits: DiffEditCreator.myersDiff(oldLines: fileContent, newLines: newContent))
+	}
+
+	/// Chunks (0-based start lines, original coordinates) for a precomputed
+	/// line edit script.
+	static func generateRewriteDiff(edits diffEdits: [DiffEdit]) -> [DiffChunk] {
 		var diffLines = convertDiffEditsToLines(diffEdits)
 		
 		// Find the index of the first addition or removal

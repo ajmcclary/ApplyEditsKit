@@ -210,15 +210,19 @@ public enum UnifiedDiffGenerator {
         newContent: [String],
         context: Int
     ) -> [DiffChunk] {
-        
         let edits = DiffEditCreator.myersDiff(
             oldLines: fileContent,
             newLines: newContent
         )
-        
+        return hunks(from: edits, context: context)
+    }
+
+    /// Hunks (1-based start lines, `context` lines around each change) for
+    /// a precomputed line edit script.
+    static func hunks(from edits: [DiffEdit], context: Int) -> [DiffChunk] {
         // Debug: print edits for small files
-        if fileContent.count <= 20 && false { // Disabled for now
-            print("DEBUG: Edits for file with \(fileContent.count) lines:")
+        if edits.count <= 20 && false { // Disabled for now
+            print("DEBUG: \(edits.count) edits:")
             for (i, edit) in edits.enumerated() {
                 print("  Edit \(i): \(edit.type) - \(edit.lines.count) lines")
                 if edit.lines.count <= 5 {
