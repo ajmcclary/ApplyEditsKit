@@ -17,6 +17,16 @@ final class ApplyEditsCoreTests: XCTestCase {
 		ApplyEditsRequest(path: path, mode: mode, verbose: verbose)
 	}
 
+	func testUnicodeNormalizationOnlyRewriteProducesADiff() async throws {
+		let original = "caf\u{e9}\n"
+		let updated = "cafe\u{301}\n"
+		let request = ApplyEditsRequest(path: "f.txt", mode: .rewrite(newText: updated, onMissing: .error), verbose: true)
+		let result = try await ApplyEditsEngine.default.apply(request: request, to: original)
+		XCTAssertEqual(Array(result.updatedText.utf8), Array(updated.utf8))
+		XCTAssertFalse(result.diffChunks.isEmpty)
+		XCTAssertFalse(result.unifiedDiff?.isEmpty ?? true)
+	}
+
 	func testRewriteUpdatesTextAndDiffWhenVerbose() async throws {
 		let original = "old\n"
 		let request = makeRequest(

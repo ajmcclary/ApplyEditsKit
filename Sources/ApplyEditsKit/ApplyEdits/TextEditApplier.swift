@@ -586,9 +586,10 @@ enum ApplyEditsDisplayDiff {
 
 	/// The texts differ, but only in line endings (including the final one).
 	static func onlyLineEndingsDiffer(original: String, updated: String) -> Bool {
-		guard original != updated else { return false }
-		return String.splitContentPreservingAllLineEndings(original).map(\.line)
-			== String.splitContentPreservingAllLineEndings(updated).map(\.line)
+		guard !original.utf8.elementsEqual(updated.utf8) else { return false }
+		let old = String.splitContentPreservingAllLineEndings(original)
+		let new = String.splitContentPreservingAllLineEndings(updated)
+		return old.count == new.count && zip(old, new).allSatisfy { $0.line.utf8.elementsEqual($1.line.utf8) }
 	}
 
 	private static func edits(

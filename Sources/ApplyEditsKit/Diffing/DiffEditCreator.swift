@@ -13,6 +13,18 @@ public struct DiffEdit {
 }
 
 public class DiffEditCreator {
+	private struct ExactLine: Hashable {
+		let text: String
+
+		static func == (lhs: Self, rhs: Self) -> Bool {
+			lhs.text.utf8.elementsEqual(rhs.text.utf8)
+		}
+
+		func hash(into hasher: inout Hasher) {
+			for byte in text.utf8 { hasher.combine(byte) }
+		}
+	}
+
 	/// Edit distance beyond which one Myers pass is not attempted on a
 	/// region. Bounds the backtracking trace to about `maxEditDistance²` Ints
 	/// (~32 MB) and the search to O((N + M) · maxEditDistance) steps.
@@ -29,6 +41,10 @@ public class DiffEditCreator {
 	/// with no such anchor is emitted as one deletion run plus one addition
 	/// run. The result is always a valid edit script.
 	public static func myersDiff(oldLines: [String], newLines: [String]) -> [DiffEdit] {
+		diff(oldLines: oldLines.map(ExactLine.init), newLines: newLines.map(ExactLine.init))
+	}
+
+	private static func diff(oldLines: [ExactLine], newLines: [ExactLine]) -> [DiffEdit] {
 		enum Work {
 			case diff(Range<Int>, Range<Int>)
 			case equal(Int)
@@ -41,11 +57,11 @@ public class DiffEditCreator {
 		while let work = stack.popLast() {
 			switch work {
 			case .equal(let index):
-				edits.append(DiffEdit(type: .equal, lines: [oldLines[index]]))
+				edits.append(DiffEdit(type: .equal, lines: [oldLines[index].text]))
 
 			case .diff(var old, var new):
 				while !old.isEmpty, !new.isEmpty, oldLines[old.lowerBound] == newLines[new.lowerBound] {
-					edits.append(DiffEdit(type: .equal, lines: [oldLines[old.lowerBound]]))
+					edits.append(DiffEdit(type: .equal, lines: [oldLines[old.lowerBound].text]))
 					old = (old.lowerBound + 1)..<old.upperBound
 					new = (new.lowerBound + 1)..<new.upperBound
 				}
@@ -88,15 +104,15 @@ public class DiffEditCreator {
 		return edits
 	}
 
-	private static func appendCoarse(_ a: ArraySlice<String>, _ b: ArraySlice<String>, into edits: inout [DiffEdit]) {
-		for line in a { edits.append(DiffEdit(type: .deletion, lines: [line])) }
-		for line in b { edits.append(DiffEdit(type: .addition, lines: [line])) }
+	private static func appendCoarse(_ a: ArraySlice<ExactLine>, _ b: ArraySlice<ExactLine>, into edits: inout [DiffEdit]) {
+		for line in a { edits.append(DiffEdit(type: .deletion, lines: [line.text])) }
+		for line in b { edits.append(DiffEdit(type: .addition, lines: [line.text])) }
 	}
 
 	/// Lines of either side that the other side cannot match (multiset
 	/// difference): every edit script needs at least this many edits.
-	private static func editDistanceLowerBound(_ a: ArraySlice<String>, _ b: ArraySlice<String>) -> Int {
-		var counts: [String: Int] = [:]
+	private static func editDistanceLowerBound(_ a: ArraySlice<ExactLine>, _ b: ArraySlice<ExactLine>) -> Int {
+		var counts: [ExactLine: Int] = [:]
 		for line in a { counts[line, default: 0] += 1 }
 		var unmatchedNew = 0
 		for line in b {
@@ -112,15 +128,15 @@ public class DiffEditCreator {
 	/// Lines occurring exactly once in `a` and once in `b`, as (old, new)
 	/// index pairs forming the longest run increasing on both sides.
 	private static func uniqueCommonAnchors(
-		_ a: ArraySlice<String>,
-		_ b: ArraySlice<String>
+		_ a: ArraySlice<ExactLine>,
+		_ b: ArraySlice<ExactLine>
 	) -> [(old: Int, new: Int)] {
-		var oldCounts: [String: (count: Int, index: Int)] = [:]
+		var oldCounts: [ExactLine: (count: Int, index: Int)] = [:]
 		for index in a.indices {
 			let entry = oldCounts[a[index]]
 			oldCounts[a[index]] = ((entry?.count ?? 0) + 1, index)
 		}
-		var newCounts: [String: (count: Int, index: Int)] = [:]
+		var newCounts: [ExactLine: (count: Int, index: Int)] = [:]
 		for index in b.indices {
 			let entry = newCounts[b[index]]
 			newCounts[b[index]] = ((entry?.count ?? 0) + 1, index)
@@ -158,7 +174,7 @@ public class DiffEditCreator {
 
 	/// Minimal diff of `a` and `b`, or `nil` when it needs more than
 	/// `maxEditDistance` edits.
-	private static func boundedMyers(_ a: [String], _ b: [String]) -> [DiffEdit]? {
+	private static func boundedMyers(_ a: [ExactLine], _ b: [ExactLine]) -> [DiffEdit]? {
 		let n = a.count
 		let m = b.count
 		let maxD = min(n + m, maxEditDistance)
@@ -209,21 +225,21 @@ public class DiffEditCreator {
 			let prevX = previous[prevK + (d - 1)]
 			let prevY = prevX - prevK
 			while x > prevX, y > prevY {
-				reversed.append(DiffEdit(type: .equal, lines: [a[x - 1]]))
+				reversed.append(DiffEdit(type: .equal, lines: [a[x - 1].text]))
 				x -= 1
 				y -= 1
 			}
 			if x == prevX {
-				reversed.append(DiffEdit(type: .addition, lines: [b[y - 1]]))
+				reversed.append(DiffEdit(type: .addition, lines: [b[y - 1].text]))
 				y -= 1
 			} else {
-				reversed.append(DiffEdit(type: .deletion, lines: [a[x - 1]]))
+				reversed.append(DiffEdit(type: .deletion, lines: [a[x - 1].text]))
 				x -= 1
 			}
 			d -= 1
 		}
 		while x > 0, y > 0 {
-			reversed.append(DiffEdit(type: .equal, lines: [a[x - 1]]))
+			reversed.append(DiffEdit(type: .equal, lines: [a[x - 1].text]))
 			x -= 1
 			y -= 1
 		}
