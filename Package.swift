@@ -74,7 +74,7 @@ let package = Package(
         // ApplyEditsCSupport (see header comment). Prerelease lower bound
         // named explicitly (SwiftPM only resolves prerelease tags when the
         // requirement names one — ProcessKit rule).
-        .package(url: "https://github.com/ajmcclary/WorkspaceKit.git", .upToNextMinor(from: "0.1.0-beta.1"))
+        .package(url: "https://github.com/ajmcclary/WorkspaceKit.git", .upToNextMinor(from: "0.1.0-beta.15"))
     ],
     targets: [
         .target(
