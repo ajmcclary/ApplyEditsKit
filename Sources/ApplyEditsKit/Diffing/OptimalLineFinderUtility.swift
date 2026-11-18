@@ -1,5 +1,6 @@
 import Foundation
 import Dispatch
+import Synchronization
 
 public class OptimalLineFinderUtility {
 	public static func findOptimalLine(for change: FileChange, in content: [String], around startLine: Int, searchRadius: Int = 5) -> Int {
@@ -16,31 +17,24 @@ public class OptimalLineFinderUtility {
 		
 		guard lowerBound <= upperBound else { return startLine } // Return original line if bounds are invalid
 		
-		let searchRange = lowerBound...upperBound
-		
-		let queue = DispatchQueue(label: "com.repoprompt.linesearch", attributes: .concurrent)
-		let group = DispatchGroup()
-		
-		var bestScore = -1
-		var bestLine = startLine
-		let lock = NSLock()
-		
-		for line in searchRange {
-			group.enter()
-			queue.async(group: group) {
-				let score = self.scoreMatch(diffChunk: change.diffChunk, in: content, startingAt: line)
-				lock.lock()
-				if score > bestScore {
-					bestScore = score
-					bestLine = line
+		let candidates = Array(lowerBound...upperBound)
+
+		// Score every candidate line concurrently. The best (score, line) pair
+		// lives behind one Mutex; ties go to the lower line number so the
+		// result does not depend on which worker finishes first.
+		let best = Mutex<(score: Int, line: Int)>((score: -1, line: startLine))
+		DispatchQueue.concurrentPerform(iterations: candidates.count) { index in
+			let line = candidates[index]
+			let score = scoreMatch(diffChunk: change.diffChunk, in: content, startingAt: line)
+			best.withLock { current in
+				if score > current.score || (score == current.score && line < current.line) {
+					current = (score: score, line: line)
 				}
-				lock.unlock()
-				group.leave()
 			}
 		}
-		
-		group.wait()
-		return bestScore > -1 ? bestLine : startLine // Return original line if no better match found
+
+		let result = best.withLock { $0 }
+		return result.score > -1 ? result.line : startLine // Return original line if no better match found
 	}
 	
 	private static func scoreMatch(diffChunk: DiffChunk, in content: [String], startingAt line: Int) -> Int {
@@ -72,24 +66,20 @@ public class OptimalLineFinderUtility {
 	}
 	
 	public static func findOptimalLinesInParallel(for changes: [FileChange], in content: [String], searchRadius: Int = 5) -> [UUID: Int] {
-		let queue = DispatchQueue(label: "com.repoprompt.optimallinefinder", attributes: .concurrent)
-		let group = DispatchGroup()
-		
-		let result = Array(repeating: NSLock(), count: changes.count)
-		var optimalLines = [UUID: Int]()
-		
-		for (index, change) in changes.enumerated() {
-			group.enter()
-			queue.async(group: group) {
-				let optimalLine = self.findOptimalLine(for: change, in: content, around: change.startLine, searchRadius: searchRadius)
-				result[index].lock()
-				optimalLines[change.id] = optimalLine
-				result[index].unlock()
-				group.leave()
-			}
+		// Each worker writes only its own slot; the Mutex makes those writes
+		// safe to publish back to this thread.
+		let slots = Mutex<[Int?]>(Array(repeating: nil, count: changes.count))
+		DispatchQueue.concurrentPerform(iterations: changes.count) { index in
+			let change = changes[index]
+			let optimalLine = findOptimalLine(for: change, in: content, around: change.startLine, searchRadius: searchRadius)
+			slots.withLock { $0[index] = optimalLine }
 		}
-		
-		group.wait()
+
+		let lines = slots.withLock { $0 }
+		var optimalLines = [UUID: Int](minimumCapacity: changes.count)
+		for (change, line) in zip(changes, lines) {
+			if let line { optimalLines[change.id] = line }
+		}
 		return optimalLines
 	}
 }
