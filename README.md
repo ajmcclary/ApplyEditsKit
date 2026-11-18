@@ -78,9 +78,9 @@ Key public types in `ApplyEditsKit`:
 
 ```swift
 dependencies: [
-    // 0.1.0-beta.5 is a prerelease identifier; SwiftPM only resolves prerelease tags when the
+    // 0.1.0-beta.6 is a prerelease identifier; SwiftPM only resolves prerelease tags when the
     // lower bound itself names one.
-    .package(url: "https://github.com/ajmcclary/ApplyEditsKit.git", .upToNextMinor(from: "0.1.0-beta.5"))
+    .package(url: "https://github.com/ajmcclary/ApplyEditsKit.git", .upToNextMinor(from: "0.1.0-beta.6"))
 ],
 targets: [
     .target(name: "MyTool", dependencies: [
