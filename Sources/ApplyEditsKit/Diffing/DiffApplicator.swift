@@ -55,33 +55,41 @@ public struct DiffApplicator {
 		return result
 	}
 	
+	/// The exact inverse of `apply`: `content` is the result of applying
+	/// `diffChunk` at `startLine`, and the chunk's lines are walked FORWARD
+	/// with the roles swapped — each addition `apply` inserted is removed,
+	/// each removal it dropped is re-inserted, context is stepped over.
+	/// Content that is empty (a chunk that deleted the whole file) is still
+	/// reverted. A chunk whose added/context lines run past the end of
+	/// `content` does not fit it and throws, as `apply` does.
 	public static func revert(_ diffChunk: DiffChunk, from content: [String], startingAt startLine: Int) throws -> [String] {
-		// Handle the case of an empty file
-		if content.isEmpty {
-			return []
-		}
-		
 		guard startLine >= 0 && startLine <= content.count else {
 			throw DiffApplicationError.outOfBounds(line: startLine, contentSize: content.count)
 		}
-		
+
 		var result = content
 		var currentLine = startLine
-		
-		for diffLine in diffChunk.lines.reversed() {
+
+		for diffLine in diffChunk.lines {
 			switch diffLine.type {
 			case .addition:
 				if currentLine < result.count {
 					result.remove(at: currentLine)
+				} else {
+					throw DiffApplicationError.outOfBounds(line: currentLine, contentSize: result.count)
 				}
 			case .removal:
 				result.insert(diffLine.content, at: currentLine)
 				currentLine += 1
 			case .context:
-				currentLine += 1
+				if currentLine < result.count {
+					currentLine += 1
+				} else {
+					throw DiffApplicationError.outOfBounds(line: currentLine, contentSize: result.count)
+				}
 			}
 		}
-		
+
 		return result
 	}
 	

@@ -71,20 +71,29 @@ public class ChangeManager {
 	}
 	
 	// File: Models/ChangeManager.swift
+	/// Shifts every change after `startLine` — in `changes` AND in
+	/// `appliedChanges`. `revertChange` reverts at the applied record's
+	/// position, so leaving those stale made undoing an earlier change before
+	/// a later one revert the later one at the wrong lines.
 	private func updateChangePositions(from startLine: Int, by difference: Int) {
-		for i in 0..<changes.count {
-			guard changes[i].startLine > startLine else { continue }
-			
-			var newStart = changes[i].startLine + difference
+		shiftPositions(of: &changes, after: startLine, by: difference)
+		shiftPositions(of: &appliedChanges, after: startLine, by: difference)
+	}
+
+	private func shiftPositions(of list: inout [FileChange], after startLine: Int, by difference: Int) {
+		for i in 0..<list.count {
+			guard list[i].startLine > startLine else { continue }
+
+			var newStart = list[i].startLine + difference
 			// Clamp so we never go out of bounds after large deletions/insertions
 			if newStart < 0 { newStart = 0 }
 			if newStart > fileContent.count { newStart = fileContent.count }
-			
-			changes[i] = FileChange(
-				id:          changes[i].id,
+
+			list[i] = FileChange(
+				id:          list[i].id,
 				startLine:   newStart,
-				description: changes[i].description,
-				diffChunk:   changes[i].diffChunk
+				description: list[i].description,
+				diffChunk:   list[i].diffChunk
 			)
 		}
 	}
